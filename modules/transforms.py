@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Callable
-
 import numpy as np
 import torch
 import torchvision.transforms as T
@@ -12,40 +10,14 @@ from PIL import Image, ImageOps
 
 class LetterBox:
     """
-    Resize an image while preserving its aspect ratio, then pad it to a square.
-
-    This transformation is useful when geometric distortion should be avoided.
-    The output image has size (size, size).
+    Resize an image while preserving aspect ratio, then pad it to a square.
     """
 
     def __init__(self, size: int, fill: tuple[int, int, int] = (0, 0, 0)):
-        """
-        Parameters
-        ----------
-        size : int
-            Target square size.
-        fill : tuple[int, int, int]
-            RGB padding colour.
-        """
-
         self.size = int(size)
         self.fill = fill
 
     def __call__(self, img: Image.Image) -> Image.Image:
-        """
-        Apply letterbox resizing.
-
-        Parameters
-        ----------
-        img : PIL.Image.Image
-            Input image.
-
-        Returns
-        -------
-        PIL.Image.Image
-            Letterboxed image with size (size, size).
-        """
-
         img = img.convert("RGB")
         width, height = img.size
 
@@ -70,38 +42,14 @@ class LetterBox:
 class SquarePad:
     """
     Pad an image to a square shape without resizing.
-
-    This can be useful for visualization or before applying Resize.
     """
 
     def __init__(self, fill: tuple[int, int, int] = (0, 0, 0)):
-        """
-        Parameters
-        ----------
-        fill : tuple[int, int, int]
-            RGB padding colour.
-        """
-
         self.fill = fill
 
     def __call__(self, img: Image.Image) -> Image.Image:
-        """
-        Apply square padding.
-
-        Parameters
-        ----------
-        img : PIL.Image.Image
-            Input image.
-
-        Returns
-        -------
-        PIL.Image.Image
-            Padded square image.
-        """
-
         img = img.convert("RGB")
         width, height = img.size
-
         max_side = max(width, height)
 
         pad_left = (max_side - width) // 2
@@ -119,14 +67,6 @@ class SquarePad:
 def get_imagenet_mean_std() -> tuple[list[float], list[float]]:
     """
     Return ImageNet mean and standard deviation.
-
-    These values should be used when feeding images into pretrained
-    torchvision backbones.
-
-    Returns
-    -------
-    tuple[list[float], list[float]]
-        ImageNet mean and standard deviation.
     """
 
     mean = [0.485, 0.456, 0.406]
@@ -137,16 +77,10 @@ def get_imagenet_mean_std() -> tuple[list[float], list[float]]:
 
 def get_normalize_transform() -> T.Normalize:
     """
-    Return torchvision normalization transform using ImageNet statistics.
-
-    Returns
-    -------
-    torchvision.transforms.Normalize
-        ImageNet normalization transform.
+    Return ImageNet normalization transform.
     """
 
     mean, std = get_imagenet_mean_std()
-
     return T.Normalize(mean=mean, std=std)
 
 
@@ -156,182 +90,24 @@ def get_hybrid_transform(
     train: bool = False,
 ) -> T.Compose:
     """
-    Return image transformation for the hybrid feature-extraction pipeline.
+    Return transform for hybrid feature extraction.
 
-    Supported modes
-    ---------------
-    stretch:
-        Directly resize image to (image_size, image_size).
-    center_crop:
-        Resize image to a slightly larger scale, then center crop.
-    letterbox:
-        Preserve aspect ratio and pad image to square.
-    augmented:
-        Resize image and apply light augmentation when train=True.
-
-    Parameters
-    ----------
-    mode : str
-        Transformation mode.
-    image_size : int
-        Target image size.
-    train : bool
-        Whether to apply stochastic training augmentation.
-
-    Returns
-    -------
-    torchvision.transforms.Compose
-        Image transform.
+    Supported modes:
+    - stretch
+    - center_crop
+    - letterbox
+    - augmented
     """
 
     mode = mode.lower().strip()
     normalize = get_normalize_transform()
-
-    if mode == "stretch":
-        transform = T.Compose(
-            [
-                T.Resize((image_size, image_size)),
-                T.ToTensor(),
-                normalize,
-            ]
-        )
-
-    elif mode == "center_crop":
-        transform = T.Compose(
-            [
-                T.Resize(int(image_size * 1.14)),
-                T.CenterCrop(image_size),
-                T.ToTensor(),
-                normalize,
-            ]
-        )
-
-    elif mode == "letterbox":
-        transform = T.Compose(
-            [
-                LetterBox(image_size),
-                T.ToTensor(),
-                normalize,
-            ]
-        )
-
-    elif mode == "augmented":
-        if train:
-            transform = T.Compose(
-                [
-                    T.Resize((image_size, image_size)),
-                    T.RandomHorizontalFlip(p=0.5),
-                    T.ColorJitter(
-                        brightness=0.2,
-                        contrast=0.2,
-                    ),
-                    T.ToTensor(),
-                    normalize,
-                ]
-            )
-        else:
-            transform = T.Compose(
-                [
-                    T.Resize((image_size, image_size)),
-                    T.ToTensor(),
-                    normalize,
-                ]
-            )
-
-    else:
-        raise ValueError(
-            f"Unsupported hybrid transform mode: {mode}. "
-            "Supported modes: stretch, center_crop, letterbox, augmented."
-        )
-
-    return transform
-
-
-def get_dl_transform(
-    image_size: int = 224,
-    train: bool = False,
-) -> T.Compose:
-    """
-    Return image transformation for end-to-end deep learning.
-
-    Training transform includes augmentation.
-    Evaluation transform is deterministic.
-
-    Parameters
-    ----------
-    image_size : int
-        Target image size.
-    train : bool
-        Whether to return training transform.
-
-    Returns
-    -------
-    torchvision.transforms.Compose
-        Image transform.
-    """
-
-    normalize = get_normalize_transform()
-
-    if train:
-        transform = T.Compose(
-            [
-                T.Resize((image_size, image_size)),
-                T.RandomHorizontalFlip(p=0.5),
-                T.ColorJitter(
-                    brightness=0.2,
-                    contrast=0.2,
-                ),
-                T.ToTensor(),
-                normalize,
-            ]
-        )
-    else:
-        transform = T.Compose(
-            [
-                T.Resize((image_size, image_size)),
-                T.ToTensor(),
-                normalize,
-            ]
-        )
-
-    return transform
-
-
-def get_preview_transform(
-    mode: str,
-    image_size: int = 224,
-    train: bool = False,
-) -> Callable[[Image.Image], Image.Image]:
-    """
-    Return a PIL-based transform for visual preview.
-
-    This function does not apply tensor conversion or normalization, so the
-    output can be directly displayed with matplotlib.
-
-    Parameters
-    ----------
-    mode : str
-        Transformation mode.
-    image_size : int
-        Target image size.
-    train : bool
-        Whether to apply stochastic augmentation for preview.
-
-    Returns
-    -------
-    Callable
-        Transform that returns a PIL image.
-    """
-
-    mode = mode.lower().strip()
-
-    if mode == "original":
-        return lambda img: img.convert("RGB")
 
     if mode == "stretch":
         return T.Compose(
             [
                 T.Resize((image_size, image_size)),
+                T.ToTensor(),
+                normalize,
             ]
         )
 
@@ -340,17 +116,17 @@ def get_preview_transform(
             [
                 T.Resize(int(image_size * 1.14)),
                 T.CenterCrop(image_size),
+                T.ToTensor(),
+                normalize,
             ]
         )
 
     if mode == "letterbox":
-        return LetterBox(image_size)
-
-    if mode == "square_pad":
         return T.Compose(
             [
-                SquarePad(),
-                T.Resize((image_size, image_size)),
+                LetterBox(image_size),
+                T.ToTensor(),
+                normalize,
             ]
         )
 
@@ -364,19 +140,55 @@ def get_preview_transform(
                         brightness=0.2,
                         contrast=0.2,
                     ),
+                    T.ToTensor(),
+                    normalize,
                 ]
             )
 
         return T.Compose(
             [
                 T.Resize((image_size, image_size)),
+                T.ToTensor(),
+                normalize,
             ]
         )
 
     raise ValueError(
-        f"Unsupported preview transform mode: {mode}. "
-        "Supported modes: original, stretch, center_crop, letterbox, "
-        "square_pad, augmented."
+        f"Unsupported transform mode: {mode}. "
+        "Supported modes: stretch, center_crop, letterbox, augmented."
+    )
+
+
+def get_dl_transform(
+    image_size: int = 224,
+    train: bool = False,
+) -> T.Compose:
+    """
+    Return transform for end-to-end deep learning.
+    """
+
+    normalize = get_normalize_transform()
+
+    if train:
+        return T.Compose(
+            [
+                T.Resize((image_size, image_size)),
+                T.RandomHorizontalFlip(p=0.5),
+                T.ColorJitter(
+                    brightness=0.2,
+                    contrast=0.2,
+                ),
+                T.ToTensor(),
+                normalize,
+            ]
+        )
+
+    return T.Compose(
+        [
+            T.Resize((image_size, image_size)),
+            T.ToTensor(),
+            normalize,
+        ]
     )
 
 
@@ -385,19 +197,7 @@ def tensor_to_display_image(
     denormalize: bool = True,
 ) -> np.ndarray:
     """
-    Convert a tensor image into a displayable NumPy image.
-
-    Parameters
-    ----------
-    tensor : torch.Tensor
-        Image tensor with shape (C, H, W).
-    denormalize : bool
-        Whether to reverse ImageNet normalization.
-
-    Returns
-    -------
-    np.ndarray
-        Image array with shape (H, W, C), values in [0, 1].
+    Convert a normalized image tensor to a displayable NumPy image.
     """
 
     if not torch.is_tensor(tensor):
@@ -418,154 +218,3 @@ def tensor_to_display_image(
     img = img.permute(1, 2, 0).numpy()
 
     return img
-
-
-def pil_to_numpy(img: Image.Image) -> np.ndarray:
-    """
-    Convert PIL image to NumPy array.
-
-    Parameters
-    ----------
-    img : PIL.Image.Image
-        Input image.
-
-    Returns
-    -------
-    np.ndarray
-        RGB image array.
-    """
-
-    return np.asarray(img.convert("RGB"))
-
-
-def apply_preview_transforms(
-    image_path: str,
-    modes: list[str],
-    image_size: int = 224,
-    train: bool = False,
-) -> list[tuple[str, Image.Image]]:
-    """
-    Apply multiple preview transformations to one image.
-
-    Parameters
-    ----------
-    image_path : str
-        Path to image.
-    modes : list[str]
-        List of preview transform modes.
-    image_size : int
-        Target image size.
-    train : bool
-        Whether stochastic augmentation is enabled for preview.
-
-    Returns
-    -------
-    list[tuple[str, PIL.Image.Image]]
-        List of (mode, transformed_image).
-    """
-
-    img = Image.open(image_path).convert("RGB")
-    outputs = []
-
-    for mode in modes:
-        transform = get_preview_transform(
-            mode=mode,
-            image_size=image_size,
-            train=train,
-        )
-        transformed = transform(img)
-        outputs.append((mode, transformed.convert("RGB")))
-
-    return outputs
-
-
-def get_transform_grid(
-    image_paths: list[str],
-    modes: list[str],
-    image_size: int = 224,
-    train: bool = False,
-) -> list[dict]:
-    """
-    Apply multiple transformations to multiple images.
-
-    This function is mainly used before visualization.
-
-    Parameters
-    ----------
-    image_paths : list[str]
-        List of image paths.
-    modes : list[str]
-        Transformation modes.
-    image_size : int
-        Target image size.
-    train : bool
-        Whether stochastic augmentation is enabled.
-
-    Returns
-    -------
-    list[dict]
-        Each dictionary contains path, mode, and image.
-    """
-
-    records = []
-
-    for path in image_paths:
-        transformed_images = apply_preview_transforms(
-            image_path=path,
-            modes=modes,
-            image_size=image_size,
-            train=train,
-        )
-
-        for mode, img in transformed_images:
-            records.append(
-                {
-                    "path": path,
-                    "mode": mode,
-                    "image": img,
-                }
-            )
-
-    return records
-
-
-def get_available_transform_modes() -> list[str]:
-    """
-    Return supported transformation modes for the hybrid pipeline.
-
-    Returns
-    -------
-    list[str]
-        Supported modes.
-    """
-
-    return [
-        "stretch",
-        "center_crop",
-        "letterbox",
-        "augmented",
-    ]
-
-
-def validate_transform_mode(mode: str) -> None:
-    """
-    Validate whether a transform mode is supported.
-
-    Parameters
-    ----------
-    mode : str
-        Transform mode.
-
-    Raises
-    ------
-    ValueError
-        If mode is not supported.
-    """
-
-    available = get_available_transform_modes()
-
-    if mode not in available:
-        raise ValueError(
-            f"Invalid transform mode: {mode}. "
-            f"Available modes: {available}"
-        )

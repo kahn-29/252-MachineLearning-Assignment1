@@ -8,19 +8,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from PIL import Image
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
 import torchvision.models as models
 from torch.utils.data import Dataset, DataLoader
-from tqdm.auto import tqdm
 
 
 class ImagePathDataset(Dataset):
     """
-    Dataset for feature extraction.
-
-    It returns transformed image tensors and optionally labels.
+    Dataset used for extracting image features from file paths.
     """
 
     def __init__(
@@ -67,28 +65,12 @@ def get_backbone(
     data_parallel: bool = False,
 ):
     """
-    Return a pretrained CNN backbone without its classification head.
+    Return a pretrained CNN backbone without the classification head.
 
     Supported backbones:
     - resnet18
     - vgg16
     - efficientnet_b0
-
-    Parameters
-    ----------
-    name : str
-        Backbone name.
-    device : torch.device | None
-        Target device.
-    pretrained : bool
-        Whether to use pretrained ImageNet weights.
-    data_parallel : bool
-        Whether to wrap the model using nn.DataParallel.
-
-    Returns
-    -------
-    torch.nn.Module
-        Backbone model in eval mode.
     """
 
     name = name.lower().strip()
@@ -137,7 +119,7 @@ def get_backbone(
 
 def get_feature_dim(backbone_name: str) -> int:
     """
-    Return output feature dimension for a supported backbone.
+    Return feature dimension of a supported backbone.
     """
 
     backbone_name = backbone_name.lower().strip()
@@ -151,7 +133,7 @@ def get_feature_dim(backbone_name: str) -> int:
     if backbone_name not in feature_dims:
         raise ValueError(
             f"Unsupported backbone: {backbone_name}. "
-            f"Available: {list(feature_dims.keys())}"
+            f"Available backbones: {list(feature_dims.keys())}"
         )
 
     return feature_dims[backbone_name]
@@ -171,35 +153,7 @@ def extract_features(
     data_parallel: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Extract deep feature vectors from images using a pretrained backbone.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe containing image paths and labels.
-    transform :
-        Image transform.
-    backbone_name : str
-        Backbone name.
-    batch_size : int
-        Batch size for DataLoader.
-    device : torch.device | None
-        Target device.
-    num_workers : int
-        Number of DataLoader workers.
-    path_col : str
-        Column containing image paths.
-    label_col : str
-        Column containing labels.
-    pretrained : bool
-        Whether to use pretrained weights.
-    data_parallel : bool
-        Whether to use DataParallel.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        X, y
+    Extract feature matrix X and label vector y from an image dataframe.
     """
 
     if path_col not in df.columns:
@@ -270,22 +224,6 @@ def save_feature_split(
 ) -> dict[str, Path]:
     """
     Save feature matrix and label vector as .npy files.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Feature matrix.
-    y : np.ndarray
-        Label vector.
-    split_name : str
-        Split name, e.g. train, val, test.
-    output_dir : str | Path
-        Output directory.
-
-    Returns
-    -------
-    dict[str, Path]
-        Saved file paths.
     """
 
     output_dir = Path(output_dir)
@@ -308,19 +246,7 @@ def load_feature_split(
     feature_dir: str | Path,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Load feature matrix and label vector for one split.
-
-    Parameters
-    ----------
-    split_name : str
-        Split name, e.g. train, val, test.
-    feature_dir : str | Path
-        Feature directory.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        X, y
+    Load feature matrix and label vector from .npy files.
     """
 
     feature_dir = Path(feature_dir)
@@ -345,7 +271,7 @@ def feature_files_exist(
     split_names=("train", "val", "test"),
 ) -> bool:
     """
-    Check whether feature files already exist for all requested splits.
+    Check whether feature files exist for all requested splits.
     """
 
     feature_dir = Path(feature_dir)
@@ -353,6 +279,7 @@ def feature_files_exist(
     for split in split_names:
         if not (feature_dir / f"X_{split}.npy").exists():
             return False
+
         if not (feature_dir / f"y_{split}.npy").exists():
             return False
 
@@ -375,44 +302,10 @@ def extract_feature_splits(
     force_recompute: bool = False,
 ) -> dict[str, Any]:
     """
-    Extract features for train, validation, and test splits.
+    Extract or load features for train, validation, and test splits.
 
-    Training transform may include augmentation.
-    Validation and test transforms should be deterministic.
-
-    Parameters
-    ----------
-    train_df : pd.DataFrame
-        Training dataframe.
-    val_df : pd.DataFrame
-        Validation dataframe.
-    test_df : pd.DataFrame
-        Test dataframe.
-    train_transform :
-        Transform applied to training images.
-    eval_transform :
-        Transform applied to validation and test images.
-    backbone_name : str
-        Backbone name.
-    batch_size : int
-        Batch size.
-    device : torch.device | None
-        Target device.
-    num_workers : int
-        Number of DataLoader workers.
-    output_dir : str | Path | None
-        If provided, save feature files to this directory.
-    pretrained : bool
-        Whether to use pretrained weights.
-    data_parallel : bool
-        Whether to use DataParallel.
-    force_recompute : bool
-        If False and output_dir contains feature files, load existing files.
-
-    Returns
-    -------
-    dict
-        Dictionary containing X_train, y_train, X_val, y_val, X_test, y_test.
+    If output_dir is provided and cached feature files already exist,
+    the function loads them unless force_recompute=True.
     """
 
     if output_dir is not None:
@@ -485,162 +378,3 @@ def extract_feature_splits(
         "loaded_from_cache": False,
         "feature_dir": output_dir,
     }
-
-
-def summarize_feature_matrix(
-    X: np.ndarray,
-    y: np.ndarray | None = None,
-) -> dict[str, Any]:
-    """
-    Return basic information about a feature matrix.
-
-    Parameters
-    ----------
-    X : np.ndarray
-        Feature matrix.
-    y : np.ndarray | None
-        Optional label vector.
-
-    Returns
-    -------
-    dict
-        Feature summary.
-    """
-
-    summary = {
-        "n_samples": int(X.shape[0]),
-        "n_features": int(X.shape[1]) if X.ndim == 2 else None,
-        "shape": tuple(X.shape),
-        "dtype": str(X.dtype),
-        "mean": float(np.mean(X)),
-        "std": float(np.std(X)),
-        "min": float(np.min(X)),
-        "max": float(np.max(X)),
-    }
-
-    if y is not None:
-        unique, counts = np.unique(y, return_counts=True)
-        summary["label_distribution"] = {
-            int(k): int(v) for k, v in zip(unique, counts)
-        }
-
-    return summary
-
-
-def save_feature_metadata(
-    metadata: dict[str, Any],
-    output_path: str | Path,
-) -> Path:
-    """
-    Save feature extraction metadata as JSON.
-
-    Parameters
-    ----------
-    metadata : dict
-        Metadata dictionary.
-    output_path : str | Path
-        Output JSON path.
-
-    Returns
-    -------
-    Path
-        Saved metadata path.
-    """
-
-    import json
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    serializable_metadata = {}
-
-    for key, value in metadata.items():
-        if isinstance(value, Path):
-            serializable_metadata[key] = str(value)
-        elif isinstance(value, np.ndarray):
-            serializable_metadata[key] = value.tolist()
-        else:
-            serializable_metadata[key] = value
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(serializable_metadata, f, indent=4, ensure_ascii=False)
-
-    return output_path
-
-
-def build_feature_dir_name(
-    preprocessing: str,
-    backbone: str,
-    image_size: int,
-) -> str:
-    """
-    Build a standardized feature directory name.
-
-    Example
-    -------
-    augmented_efficientnet_b0_224
-    """
-
-    preprocessing = preprocessing.lower().replace(" ", "_")
-    backbone = backbone.lower().replace(" ", "_")
-
-    return f"{preprocessing}_{backbone}_{image_size}"
-
-
-def load_or_extract_feature_splits(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    train_transform,
-    eval_transform,
-    backbone_name: str,
-    feature_root: str | Path,
-    preprocessing_name: str,
-    image_size: int = 224,
-    batch_size: int = 128,
-    device=None,
-    num_workers: int = 0,
-    force_recompute: bool = False,
-) -> dict[str, Any]:
-    """
-    Convenience wrapper that creates a standardized feature directory and
-    loads or extracts train/val/test features.
-    """
-
-    feature_root = Path(feature_root)
-    feature_dir = feature_root / build_feature_dir_name(
-        preprocessing=preprocessing_name,
-        backbone=backbone_name,
-        image_size=image_size,
-    )
-
-    result = extract_feature_splits(
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
-        train_transform=train_transform,
-        eval_transform=eval_transform,
-        backbone_name=backbone_name,
-        batch_size=batch_size,
-        device=device,
-        num_workers=num_workers,
-        output_dir=feature_dir,
-        force_recompute=force_recompute,
-    )
-
-    metadata = {
-        "preprocessing": preprocessing_name,
-        "backbone": backbone_name,
-        "image_size": image_size,
-        "batch_size": batch_size,
-        "feature_dim": get_feature_dim(backbone_name),
-        "train_shape": result["X_train"].shape,
-        "val_shape": result["X_val"].shape,
-        "test_shape": result["X_test"].shape,
-        "loaded_from_cache": result["loaded_from_cache"],
-    }
-
-    save_feature_metadata(metadata, feature_dir / "feature_metadata.json")
-    result["metadata"] = metadata
-
-    return result
