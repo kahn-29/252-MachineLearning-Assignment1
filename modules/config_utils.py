@@ -14,6 +14,46 @@ except ImportError:
     torch = None
 
 
+
+def get_default_config() -> dict:
+    return {
+        "DATASET": {
+            "kaggle_id": "tongpython/cat-and-dog",
+        },
+        "CLEANING": {
+            "blur_laplacian_min":   40.0,
+            "min_side_min":         64,
+            "near_mono_ratio_max":  0.92,
+            "aspect_extremity_max": 5.0,
+            "remove_corrupted":     True,
+            "remove_duplicates":    False,   # set True to enable phash near-duplicate removal
+        },
+        "SPLIT": {
+            "train": 0.8,
+            "val":   0.1,
+            "test":  0.1,
+            "seed":  42,
+        },
+        "CLASSICAL": {
+            # Feature extractor: "resnet18" | "vgg16" | "efficientnet_b0"
+            "backbone":     "efficientnet_b0",
+            # Resize mode: "letterbox" | "stretch" | "center_crop"
+            "preprocessing": "letterbox",
+            "image_size":    224,
+            "batch_size":    64,
+            # Classifier: "logistic_regression" | "svm_linear" | "random_forest"
+            "classifier":   "logistic_regression",
+            # Ensemble: when True, trains all 3 base + Voting + Stacking
+            "ENSEMBLE":     False,
+            # Classifier hyperparameters
+            "lr_C":          1.0,
+            "svm_C":         1.0,
+            "rf_n_estimators": 200,
+            "rf_max_depth":  None,
+        },
+    }
+
+
 def deep_update(default: dict, override: dict | None) -> dict:
     """Return a recursively merged copy of default overridden by override."""
 
