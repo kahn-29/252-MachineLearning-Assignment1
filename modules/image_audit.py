@@ -1,48 +1,85 @@
+"""
+Image-audit utilities for image-quality analysis.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Sequence
 
 import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image
+from tqdm.auto import tqdm
 
 
-def read_image_cv2(path: str | Path):
-    """Read an image with OpenCV and return BGR array or None."""
+DEFAULT_AUDIT_METRICS = (
+    "blur_laplacian",
+    "entropy",
+    "brightness_mean",
+    "brightness_std",
+    "gray_diff_mean",
+    "gray_diff_p95",
+    "near_gray_ratio_10",
+    "dark_ratio",
+    "bright_ratio",
+    "near_mono_ratio",
+    "mean_sat",
+    "std_sat",
+    "chroma_mean",
+    "chroma_std",
+    "chromaticity_spread",
+    "center_saliency_ratio",
+    "saliency_mean",
+    "saliency_max",
+    "compression_artifact",
+    "min_side",
+    "aspect_extremity",
+)
 
+
+def _none_if_missing(value: Any) -> Any | None:
+    """Convert pandas missing values to None."""
+    return None if pd.isna(value) else value
+
+
+def read_image_cv2(path: str | Path) -> np.ndarray | None:
+    """Read an image with OpenCV and return a BGR array, or None if unreadable."""
     try:
-        return cv2.imread(str(path), cv2.IMREAD_COLOR)
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     except Exception:
         return None
 
+    if image is None or image.size == 0:
+        return None
+
+    return image
+
 
 def read_image_pil(path: str | Path) -> Image.Image | None:
-    """Read an image with PIL and return an RGB image or None."""
-
+    """Read an image with PIL and return an RGB image, or None if unreadable."""
     try:
         return Image.open(path).convert("RGB")
     except Exception:
         return None
 
 
-def compute_laplacian_variance(gray: np.ndarray) -> float:
+def compute_laplacian_variance(gray: np.ndarray | None) -> float:
     """Compute Laplacian variance where lower values indicate more blur."""
-
     if gray is None or gray.size == 0:
         return float("nan")
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def compute_entropy(gray: np.ndarray) -> float:
-    """Compute Shannon entropy from grayscale histogram."""
-
+def compute_entropy(gray: np.ndarray | None) -> float:
+    """Compute Shannon entropy from a grayscale histogram."""
     if gray is None or gray.size == 0:
         return float("nan")
 
     hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).ravel()
     hist = hist[hist > 0]
+
     if hist.size == 0:
         return 0.0
 
@@ -50,9 +87,8 @@ def compute_entropy(gray: np.ndarray) -> float:
     return float(-np.sum(prob * np.log2(prob)))
 
 
-def compute_brightness_stats(gray: np.ndarray) -> dict:
+def compute_brightness_stats(gray: np.ndarray | None) -> dict[str, float]:
     """Compute brightness mean and standard deviation."""
-
     if gray is None or gray.size == 0:
         return {"brightness_mean": float("nan"), "brightness_std": float("nan")}
 
@@ -62,9 +98,8 @@ def compute_brightness_stats(gray: np.ndarray) -> dict:
     }
 
 
-def compute_gray_tolerance(rgb: np.ndarray) -> dict:
+def compute_gray_tolerance(rgb: np.ndarray | None) -> dict[str, float]:
     """Measure channel differences to estimate grayscale likeness."""
-
     if rgb is None or rgb.size == 0:
         return {
             "gray_diff_mean": float("nan"),
@@ -82,9 +117,8 @@ def compute_gray_tolerance(rgb: np.ndarray) -> dict:
     }
 
 
-def compute_near_mono_metrics(gray: np.ndarray) -> dict:
+def compute_near_mono_metrics(gray: np.ndarray | None) -> dict[str, float]:
     """Compute near-black/near-white ratios and total near-monochrome ratio."""
-
     if gray is None or gray.size == 0:
         return {
             "dark_ratio": float("nan"),
@@ -92,19 +126,18 @@ def compute_near_mono_metrics(gray: np.ndarray) -> dict:
             "near_mono_ratio": float("nan"),
         }
 
-    dark_ratio = (gray < 15).mean()
-    bright_ratio = (gray > 240).mean()
+    dark_ratio = float((gray < 15).mean())
+    bright_ratio = float((gray > 240).mean())
 
     return {
-        "dark_ratio": float(dark_ratio),
-        "bright_ratio": float(bright_ratio),
-        "near_mono_ratio": float(dark_ratio + bright_ratio),
+        "dark_ratio": dark_ratio,
+        "bright_ratio": bright_ratio,
+        "near_mono_ratio": min(1.0, dark_ratio + bright_ratio),
     }
 
 
-def compute_aspect_metrics(width: int, height: int) -> dict:
+def compute_aspect_metrics(width: int, height: int) -> dict[str, float | int]:
     """Compute size and aspect metrics from image width and height."""
-
     if width <= 0 or height <= 0:
         return {
             "width": float("nan"),
@@ -127,20 +160,22 @@ def compute_aspect_metrics(width: int, height: int) -> dict:
     }
 
 
-def compute_saturation_metrics(bgr: np.ndarray) -> dict:
-    """Compute mean and std saturation from HSV representation."""
-
+def compute_saturation_metrics(bgr: np.ndarray | None) -> dict[str, float]:
+    """Compute mean and standard deviation of saturation from HSV representation."""
     if bgr is None or bgr.size == 0:
         return {"mean_sat": float("nan"), "std_sat": float("nan")}
 
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1].astype(np.float32)
-    return {"mean_sat": float(sat.mean()), "std_sat": float(sat.std())}
+    saturation = hsv[:, :, 1].astype(np.float32)
+
+    return {
+        "mean_sat": float(saturation.mean()),
+        "std_sat": float(saturation.std()),
+    }
 
 
-def compute_chromaticity_metrics(rgb: np.ndarray) -> dict:
-    """Compute simple color variation metrics from RGB image."""
-
+def compute_chromaticity_metrics(rgb: np.ndarray | None) -> dict[str, float]:
+    """Compute simple color variation metrics from an RGB image."""
     if rgb is None or rgb.size == 0:
         return {
             "chroma_mean": float("nan"),
@@ -163,7 +198,7 @@ def compute_chromaticity_metrics(rgb: np.ndarray) -> dict:
     denom = x_big + y_big + z_big
     valid = denom > 1e-6
 
-    if valid.sum() < 2:
+    if int(valid.sum()) < 2:
         spread = 0.0
     else:
         x = x_big[valid] / denom[valid]
@@ -177,9 +212,8 @@ def compute_chromaticity_metrics(rgb: np.ndarray) -> dict:
     }
 
 
-def compute_center_saliency(gray: np.ndarray) -> dict:
+def compute_center_saliency(gray: np.ndarray | None) -> dict[str, float]:
     """Use Sobel magnitude as a lightweight center-saliency proxy."""
-
     if gray is None or gray.size == 0:
         return {
             "center_saliency_ratio": float("nan"),
@@ -200,15 +234,14 @@ def compute_center_saliency(gray: np.ndarray) -> dict:
     center = float(saliency[y0:y1, x0:x1].sum())
 
     return {
-        "center_saliency_ratio": center / total,
+        "center_saliency_ratio": float(center / total),
         "saliency_mean": float(saliency.mean()),
         "saliency_max": float(saliency.max()),
     }
 
 
-def compute_compression_artifact(gray: np.ndarray) -> float:
+def compute_compression_artifact(gray: np.ndarray | None) -> float:
     """Approximate block-compression artifacts from 8-pixel boundaries."""
-
     if gray is None or gray.size == 0:
         return float("nan")
 
@@ -223,35 +256,40 @@ def compute_compression_artifact(gray: np.ndarray) -> float:
     cols = np.arange(7, w - 1, 8)
     rows = np.arange(7, h - 1, 8)
 
-    if cols.size == 0 or rows.size == 0:
+    boundary_values: list[float] = []
+    if cols.size > 0:
+        boundary_values.append(float(gx[:, cols].mean()))
+    if rows.size > 0:
+        boundary_values.append(float(gy[rows, :].mean()))
+
+    if not boundary_values:
         return 0.0
 
-    boundary_x = gx[:, cols].mean()
-    boundary_y = gy[rows, :].mean()
-    global_grad = (gx.mean() + gy.mean()) / 2.0 + 1e-8
+    boundary_mean = float(np.mean(boundary_values))
+    global_grad = float((gx.mean() + gy.mean()) / 2.0) + 1e-8
 
-    return float(((boundary_x + boundary_y) / 2.0) / global_grad)
+    return float(boundary_mean / global_grad)
 
 
 def compute_phash(path: str | Path) -> str | None:
-    """Compute perceptual hash using imagehash.phash."""
-
+    """Compute perceptual hash using imagehash.phash when imagehash is installed."""
     try:
         import imagehash
     except ImportError:
         return None
 
-    img = read_image_pil(path)
-    if img is None:
+    image = read_image_pil(path)
+    if image is None:
         return None
 
     try:
-        return str(imagehash.phash(img, hash_size=8))
+        return str(imagehash.phash(image, hash_size=8))
     except Exception:
         return None
 
 
-def _nan_record(path: str, label: int | None, label_name: str | None) -> dict:
+def _nan_record(path: str, label: Any | None, label_name: Any | None) -> dict[str, Any]:
+    """Return a full audit record for an unreadable/corrupted image."""
     nan = float("nan")
     return {
         "path": path,
@@ -289,30 +327,31 @@ def _nan_record(path: str, label: int | None, label_name: str | None) -> dict:
 
 def inspect_image(
     path: str | Path,
-    label: int | None = None,
-    label_name: str | None = None,
+    label: Any | None = None,
+    label_name: Any | None = None,
     compute_hash: bool = True,
-) -> dict:
+) -> dict[str, Any]:
     """Inspect a single image and return a dictionary of audit metrics."""
-
     path_str = str(path)
-    bgr = read_image_cv2(path_str)
+    label = _none_if_missing(label)
+    label_name = _none_if_missing(label_name)
 
+    bgr = read_image_cv2(path_str)
     if bgr is None:
         return _nan_record(path_str, label, label_name)
 
-    h, w = bgr.shape[:2]
+    height, width = bgr.shape[:2]
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    record = {
+    record: dict[str, Any] = {
         "path": path_str,
         "label": label,
         "label_name": label_name,
         "is_corrupted": False,
     }
 
-    record.update(compute_aspect_metrics(width=w, height=h))
+    record.update(compute_aspect_metrics(width=width, height=height))
     record.update(compute_brightness_stats(gray))
     record["blur_laplacian"] = compute_laplacian_variance(gray)
     record["entropy"] = compute_entropy(gray)
@@ -333,26 +372,39 @@ def audit_dataframe(
     label_col: str = "label",
     label_name_col: str = "label_name",
     compute_hash: bool = True,
+    preserve_cols: Sequence[str] | None = None,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
     """Run inspect_image for each row and return an audit dataframe."""
-
     if path_col not in df.columns:
         raise KeyError(f"Required column not found: {path_col}")
 
-    records: list[dict] = []
+    preserve_cols = list(preserve_cols or [])
+    missing_preserve_cols = [col for col in preserve_cols if col not in df.columns]
+    if missing_preserve_cols:
+        raise KeyError(f"preserve_cols not found in dataframe: {missing_preserve_cols}")
 
-    for _, row in df.iterrows():
+    records: list[dict[str, Any]] = []
+    iterator = df.iterrows()
+    if show_progress:
+        iterator = tqdm(iterator, total=len(df), desc="Auditing images", leave=False)
+
+    for _, row in iterator:
         path = row[path_col]
         label = row[label_col] if label_col in df.columns else None
         label_name = row[label_name_col] if label_name_col in df.columns else None
-        records.append(
-            inspect_image(
-                path=path,
-                label=label,
-                label_name=label_name,
-                compute_hash=compute_hash,
-            )
+
+        record = inspect_image(
+            path=path,
+            label=label,
+            label_name=label_name,
+            compute_hash=compute_hash,
         )
+
+        for col in preserve_cols:
+            record[col] = row[col]
+
+        records.append(record)
 
     return pd.DataFrame(records).reset_index(drop=True)
 
@@ -362,28 +414,34 @@ def describe_audit_metrics(
     metrics: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """Return descriptive statistics for selected audit metrics."""
+    metric_names = list(metrics or DEFAULT_AUDIT_METRICS)
+    metric_cols = [metric for metric in metric_names if metric in audit_df.columns]
 
-    if metrics is None:
-        metrics = [
-            "blur_laplacian",
-            "entropy",
-            "brightness_mean",
-            "brightness_std",
-            "gray_diff_mean",
-            "near_gray_ratio_10",
-            "near_mono_ratio",
-            "mean_sat",
-            "chroma_mean",
-            "center_saliency_ratio",
-            "compression_artifact",
-            "min_side",
-            "aspect_extremity",
-        ]
-
-    metric_cols = [m for m in metrics if m in audit_df.columns]
     if not metric_cols:
         raise ValueError("No valid metric columns found in audit_df.")
 
-    return audit_df[metric_cols].describe(
-        percentiles=[0.01, 0.05, 0.10, 0.25, 0.5, 0.75, 0.90, 0.95, 0.99]
+    numeric_df = audit_df[metric_cols].apply(pd.to_numeric, errors="coerce")
+    return numeric_df.describe(
+        percentiles=[0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
     ).T
+
+
+__all__ = [
+    "DEFAULT_AUDIT_METRICS",
+    "read_image_cv2",
+    "read_image_pil",
+    "compute_laplacian_variance",
+    "compute_entropy",
+    "compute_brightness_stats",
+    "compute_gray_tolerance",
+    "compute_near_mono_metrics",
+    "compute_aspect_metrics",
+    "compute_saturation_metrics",
+    "compute_chromaticity_metrics",
+    "compute_center_saliency",
+    "compute_compression_artifact",
+    "compute_phash",
+    "inspect_image",
+    "audit_dataframe",
+    "describe_audit_metrics",
+]
