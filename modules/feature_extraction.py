@@ -1,177 +1,162 @@
-# modules/feature_extraction.py
+"""
+Frozen-backbone feature extraction utilities.
+"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+import torch
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-import torch
-import torch.nn as nn
-import torchvision.models as models
-from torch.utils.data import Dataset, DataLoader
+from modules.artifacts import feature_files_exist, load_feature_split, save_feature_split
+from modules.backbones import get_backbone, get_feature_dim
+from modules.datasets import ImagePathDataset
 
 
-class ImagePathDataset(Dataset):
-    """
-    Dataset used for extracting image features from file paths.
-    """
-
-    def __init__(
-        self,
-        paths,
-        labels=None,
-        transform=None,
-        fallback_size: int = 224,
-    ):
-        self.paths = list(paths)
-        self.labels = None if labels is None else np.asarray(labels)
-        self.transform = transform
-        self.fallback_size = fallback_size
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, idx):
-        path = self.paths[idx]
-
-        try:
-            img = Image.open(path).convert("RGB")
-        except Exception:
-            img = Image.new(
-                "RGB",
-                (self.fallback_size, self.fallback_size),
-                (128, 128, 128),
-            )
-
-        if self.transform is not None:
-            img = self.transform(img)
-
-        if self.labels is None:
-            return img
-
-        label = int(self.labels[idx])
-        return img, label
+def _as_device(device: str | torch.device | None = None) -> torch.device:
+    """Return a torch.device from a string/device/None value."""
+    if device is None or str(device).lower() == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
 
 
-def get_backbone(
-    name: str,
-    device=None,
-    pretrained: bool = True,
-    data_parallel: bool = False,
-):
-    """
-    Return a pretrained CNN backbone without the classification head.
-
-    Supported backbones:
-    - resnet18
-    - vgg16
-    - efficientnet_b0
-    """
-
-    name = name.lower().strip()
-
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if name == "resnet18":
-        weights = models.ResNet18_Weights.DEFAULT if pretrained else None
-        base = models.resnet18(weights=weights)
-        model = nn.Sequential(*list(base.children())[:-1])
-
-    elif name == "vgg16":
-        weights = models.VGG16_Weights.DEFAULT if pretrained else None
-        base = models.vgg16(weights=weights)
-        model = nn.Sequential(
-            base.features,
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
-
-    elif name == "efficientnet_b0":
-        weights = models.EfficientNet_B0_Weights.DEFAULT if pretrained else None
-        base = models.efficientnet_b0(weights=weights)
-        model = nn.Sequential(
-            base.features,
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
-
-    else:
-        raise ValueError(
-            f"Unsupported backbone: {name}. "
-            "Supported backbones: resnet18, vgg16, efficientnet_b0."
-        )
-
-    if data_parallel and torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-
-    model = model.to(device)
-    model.eval()
-
-    for param in model.parameters():
-        param.requires_grad = False
-
-    return model
+def _validate_positive_int(value: int, name: str, allow_zero: bool = False) -> int:
+    """Validate and return a positive integer hyperparameter."""
+    int_value = int(value)
+    if allow_zero:
+        if int_value < 0:
+            raise ValueError(f"{name} must be non-negative, got {int_value}.")
+    elif int_value <= 0:
+        raise ValueError(f"{name} must be positive, got {int_value}.")
+    return int_value
 
 
-def get_feature_dim(backbone_name: str) -> int:
-    """
-    Return feature dimension of a supported backbone.
-    """
+def _validate_feature_dataframe(
+    df: pd.DataFrame,
+    path_col: str,
+    label_col: str,
+) -> None:
+    """Validate dataframe columns required for feature extraction."""
+    if path_col not in df.columns:
+        raise KeyError(f"path_col not found in dataframe: {path_col}")
+    if label_col not in df.columns:
+        raise KeyError(f"label_col not found in dataframe: {label_col}")
 
-    backbone_name = backbone_name.lower().strip()
 
-    feature_dims = {
-        "resnet18": 512,
-        "vgg16": 512,
-        "efficientnet_b0": 1280,
+def _feature_cache_manifest_path(output_dir: str | Path) -> Path:
+    """Return the metadata path for cached feature splits."""
+    return Path(output_dir) / "feature_manifest.json"
+
+
+def _build_feature_manifest(
+    backbone_name: str,
+    pretrained: bool,
+    split_sizes: Mapping[str, int],
+) -> dict[str, Any]:
+    """Build lightweight metadata for cached feature splits."""
+    return {
+        "backbone_name": str(backbone_name),
+        "pretrained": bool(pretrained),
+        "feature_dim": int(get_feature_dim(backbone_name)),
+        "split_sizes": {str(key): int(value) for key, value in split_sizes.items()},
     }
 
-    if backbone_name not in feature_dims:
-        raise ValueError(
-            f"Unsupported backbone: {backbone_name}. "
-            f"Available backbones: {list(feature_dims.keys())}"
-        )
 
-    return feature_dims[backbone_name]
+def _write_feature_manifest(
+    output_dir: str | Path,
+    manifest: Mapping[str, Any],
+) -> None:
+    """Write feature-cache metadata."""
+    path = _feature_cache_manifest_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(dict(manifest), file, ensure_ascii=False, indent=2)
+
+
+def _read_feature_manifest(output_dir: str | Path) -> dict[str, Any] | None:
+    """Read feature-cache metadata when available."""
+    path = _feature_cache_manifest_path(output_dir)
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _cache_matches_request(
+    output_dir: str | Path,
+    backbone_name: str,
+    pretrained: bool,
+    expected_split_sizes: Mapping[str, int],
+) -> bool:
+    """Return True when cache metadata matches the requested extraction setup.
+
+    If no manifest exists, this returns True for backward compatibility with
+    older caches that only contain X_<split>.npy / y_<split>.npy files.
+    """
+    manifest = _read_feature_manifest(output_dir)
+    if manifest is None:
+        return True
+
+    expected = _build_feature_manifest(
+        backbone_name=backbone_name,
+        pretrained=pretrained,
+        split_sizes=expected_split_sizes,
+    )
+
+    return (
+        manifest.get("backbone_name") == expected["backbone_name"]
+        and bool(manifest.get("pretrained")) == expected["pretrained"]
+        and int(manifest.get("feature_dim", -1)) == expected["feature_dim"]
+        and dict(manifest.get("split_sizes", {})) == expected["split_sizes"]
+    )
 
 
 @torch.inference_mode()
 def extract_features(
     df: pd.DataFrame,
-    transform,
+    transform: Any,
     backbone_name: str,
     batch_size: int = 128,
-    device=None,
+    device: str | torch.device | None = None,
     num_workers: int = 0,
     path_col: str = "path",
     label_col: str = "label",
     pretrained: bool = True,
     data_parallel: bool = False,
+    show_progress: bool = True,
+    on_error: str = "raise",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extract feature matrix X and label vector y from an image dataframe.
-    """
+    """Extract a feature matrix ``X`` and label vector ``y`` from an image dataframe."""
+    _validate_feature_dataframe(df, path_col=path_col, label_col=label_col)
 
-    if path_col not in df.columns:
-        raise KeyError(f"path_col not found in dataframe: {path_col}")
+    batch_size = _validate_positive_int(batch_size, "batch_size")
+    num_workers = _validate_positive_int(num_workers, "num_workers", allow_zero=True)
+    device = _as_device(device)
 
-    if label_col not in df.columns:
-        raise KeyError(f"label_col not found in dataframe: {label_col}")
+    feature_dim = get_feature_dim(backbone_name)
 
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if df.empty:
+        return (
+            np.empty((0, feature_dim), dtype=np.float32),
+            np.empty((0,), dtype=np.int64),
+        )
 
-    paths = df[path_col].values
-    labels = df[label_col].values.astype(np.int64)
+    if transform is None:
+        raise ValueError("transform must not be None for feature extraction.")
 
     dataset = ImagePathDataset(
-        paths=paths,
-        labels=labels,
+        df=df,
         transform=transform,
+        path_col=path_col,
+        label_col=label_col,
+        return_labels=True,
+        on_error=on_error,
     )
 
     loader = DataLoader(
@@ -186,127 +171,94 @@ def extract_features(
         name=backbone_name,
         device=device,
         pretrained=pretrained,
+        freeze=True,
         data_parallel=data_parallel,
     )
 
-    features = []
-    y_values = []
+    features: list[np.ndarray] = []
+    labels: list[np.ndarray] = []
 
-    for imgs, batch_labels in tqdm(
+    progress = tqdm(
         loader,
         desc=f"Extracting features ({backbone_name})",
         leave=False,
-    ):
-        imgs = imgs.to(device, non_blocking=True)
+        disable=not show_progress,
+    )
 
-        output = model(imgs)
-        output = output.view(output.size(0), -1)
+    for images, batch_labels in progress:
+        images = images.to(device, non_blocking=True)
 
-        features.append(output.detach().cpu().numpy())
-        y_values.append(batch_labels.numpy())
+        outputs = model(images)
+        outputs = outputs.flatten(start_dim=1)
+
+        features.append(outputs.detach().cpu().numpy().astype(np.float32, copy=False))
+        labels.append(batch_labels.detach().cpu().numpy().astype(np.int64, copy=False))
+
+    if not features:
+        return (
+            np.empty((0, feature_dim), dtype=np.float32),
+            np.empty((0,), dtype=np.int64),
+        )
 
     X = np.vstack(features)
-    y = np.concatenate(y_values)
+    y = np.concatenate(labels)
+
+    if X.shape[1] != feature_dim:
+        raise ValueError(
+            f"Extracted feature dimension mismatch for {backbone_name}: "
+            f"expected {feature_dim}, got {X.shape[1]}."
+        )
 
     del model
-
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
     return X, y
 
 
-def save_feature_split(
-    X: np.ndarray,
-    y: np.ndarray,
-    split_name: str,
-    output_dir: str | Path,
-) -> dict[str, Path]:
-    """
-    Save feature matrix and label vector as .npy files.
-    """
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    x_path = output_dir / f"X_{split_name}.npy"
-    y_path = output_dir / f"y_{split_name}.npy"
-
-    np.save(x_path, X)
-    np.save(y_path, y)
+def _load_cached_feature_splits(output_dir: str | Path) -> dict[str, Any]:
+    """Load train/val/test feature splits from cache."""
+    X_train, y_train = load_feature_split("train", output_dir)
+    X_val, y_val = load_feature_split("val", output_dir)
+    X_test, y_test = load_feature_split("test", output_dir)
 
     return {
-        "X": x_path,
-        "y": y_path,
+        "X_train": X_train,
+        "y_train": y_train,
+        "X_val": X_val,
+        "y_val": y_val,
+        "X_test": X_test,
+        "y_test": y_test,
+        "loaded_from_cache": True,
+        "feature_dir": Path(output_dir),
     }
-
-
-def load_feature_split(
-    split_name: str,
-    feature_dir: str | Path,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Load feature matrix and label vector from .npy files.
-    """
-
-    feature_dir = Path(feature_dir)
-
-    x_path = feature_dir / f"X_{split_name}.npy"
-    y_path = feature_dir / f"y_{split_name}.npy"
-
-    if not x_path.exists():
-        raise FileNotFoundError(f"Feature file not found: {x_path}")
-
-    if not y_path.exists():
-        raise FileNotFoundError(f"Label file not found: {y_path}")
-
-    X = np.load(x_path)
-    y = np.load(y_path)
-
-    return X, y
-
-
-def feature_files_exist(
-    feature_dir: str | Path,
-    split_names=("train", "val", "test"),
-) -> bool:
-    """
-    Check whether feature files exist for all requested splits.
-    """
-
-    feature_dir = Path(feature_dir)
-
-    for split in split_names:
-        if not (feature_dir / f"X_{split}.npy").exists():
-            return False
-
-        if not (feature_dir / f"y_{split}.npy").exists():
-            return False
-
-    return True
 
 
 def extract_feature_splits(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     test_df: pd.DataFrame,
-    train_transform,
-    eval_transform,
+    train_transform: Any,
+    eval_transform: Any,
     backbone_name: str,
     batch_size: int = 128,
-    device=None,
+    device: str | torch.device | None = None,
     num_workers: int = 0,
     output_dir: str | Path | None = None,
     pretrained: bool = True,
     data_parallel: bool = False,
     force_recompute: bool = False,
+    path_col: str = "path",
+    label_col: str = "label",
+    show_progress: bool = True,
+    on_error: str = "raise",
 ) -> dict[str, Any]:
-    """
-    Extract or load features for train, validation, and test splits.
-
-    If output_dir is provided and cached feature files already exist,
-    the function loads them unless force_recompute=True.
-    """
+    """Extract or load cached features for train, validation, and test splits."""
+    split_sizes = {
+        "train": len(train_df),
+        "val": len(val_df),
+        "test": len(test_df),
+    }
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -314,21 +266,14 @@ def extract_feature_splits(
         if (
             not force_recompute
             and feature_files_exist(output_dir, split_names=("train", "val", "test"))
+            and _cache_matches_request(
+                output_dir=output_dir,
+                backbone_name=backbone_name,
+                pretrained=pretrained,
+                expected_split_sizes=split_sizes,
+            )
         ):
-            X_train, y_train = load_feature_split("train", output_dir)
-            X_val, y_val = load_feature_split("val", output_dir)
-            X_test, y_test = load_feature_split("test", output_dir)
-
-            return {
-                "X_train": X_train,
-                "y_train": y_train,
-                "X_val": X_val,
-                "y_val": y_val,
-                "X_test": X_test,
-                "y_test": y_test,
-                "loaded_from_cache": True,
-                "feature_dir": output_dir,
-            }
+            return _load_cached_feature_splits(output_dir)
 
     X_train, y_train = extract_features(
         df=train_df,
@@ -337,8 +282,12 @@ def extract_feature_splits(
         batch_size=batch_size,
         device=device,
         num_workers=num_workers,
+        path_col=path_col,
+        label_col=label_col,
         pretrained=pretrained,
         data_parallel=data_parallel,
+        show_progress=show_progress,
+        on_error=on_error,
     )
 
     X_val, y_val = extract_features(
@@ -348,8 +297,12 @@ def extract_feature_splits(
         batch_size=batch_size,
         device=device,
         num_workers=num_workers,
+        path_col=path_col,
+        label_col=label_col,
         pretrained=pretrained,
         data_parallel=data_parallel,
+        show_progress=show_progress,
+        on_error=on_error,
     )
 
     X_test, y_test = extract_features(
@@ -359,14 +312,26 @@ def extract_feature_splits(
         batch_size=batch_size,
         device=device,
         num_workers=num_workers,
+        path_col=path_col,
+        label_col=label_col,
         pretrained=pretrained,
         data_parallel=data_parallel,
+        show_progress=show_progress,
+        on_error=on_error,
     )
 
     if output_dir is not None:
         save_feature_split(X_train, y_train, "train", output_dir)
         save_feature_split(X_val, y_val, "val", output_dir)
         save_feature_split(X_test, y_test, "test", output_dir)
+        _write_feature_manifest(
+            output_dir,
+            _build_feature_manifest(
+                backbone_name=backbone_name,
+                pretrained=pretrained,
+                split_sizes=split_sizes,
+            ),
+        )
 
     return {
         "X_train": X_train,
@@ -376,5 +341,56 @@ def extract_feature_splits(
         "X_test": X_test,
         "y_test": y_test,
         "loaded_from_cache": False,
-        "feature_dir": output_dir,
+        "feature_dir": Path(output_dir) if output_dir is not None else None,
     }
+
+
+def load_or_extract_feature_splits(
+    splits: Mapping[str, pd.DataFrame],
+    transforms: Mapping[str, Any],
+    config: Mapping[str, Any],
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Config-driven wrapper for extracting feature splits.
+
+    Expected ``splits`` keys: ``train``, ``val``, and ``test``.
+    Expected ``transforms`` keys: ``train`` and ``eval`` or split-specific keys.
+    """
+    for split_name in ("train", "val", "test"):
+        if split_name not in splits:
+            raise KeyError(f"splits must contain '{split_name}'.")
+
+    train_transform = transforms.get("train")
+    eval_transform = transforms.get("eval", transforms.get("val", transforms.get("test")))
+
+    if train_transform is None:
+        raise KeyError("transforms must contain 'train'.")
+    if eval_transform is None:
+        raise KeyError("transforms must contain 'eval', 'val', or 'test'.")
+
+    feature_config = dict(config.get("feature_extraction", config))
+
+    return extract_feature_splits(
+        train_df=splits["train"],
+        val_df=splits["val"],
+        test_df=splits["test"],
+        train_transform=train_transform,
+        eval_transform=eval_transform,
+        backbone_name=str(feature_config.get("backbone", "efficientnet_b0")),
+        batch_size=int(feature_config.get("batch_size", 128)),
+        device=feature_config.get("device"),
+        num_workers=int(feature_config.get("num_workers", 0)),
+        output_dir=output_dir,
+        pretrained=bool(feature_config.get("pretrained", True)),
+        data_parallel=bool(feature_config.get("data_parallel", False)),
+        force_recompute=bool(feature_config.get("force_recompute", False)),
+        show_progress=bool(feature_config.get("show_progress", True)),
+        on_error=str(feature_config.get("on_error", "raise")),
+    )
+
+
+__all__ = [
+    "extract_features",
+    "extract_feature_splits",
+    "load_or_extract_feature_splits",
+]

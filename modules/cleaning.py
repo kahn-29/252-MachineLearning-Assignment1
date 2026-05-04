@@ -1,74 +1,280 @@
+"""
+Image-cleaning utilities for the cat/dog image-classification project.
+"""
+
 from __future__ import annotations
 
 from collections import defaultdict
-from itertools import combinations
+from collections.abc import Hashable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
+
+_REASON_MAP: dict[str, str] = {
+    "flag_corrupted": "corrupted",
+    "flag_duplicate": "near_duplicate",
+    "flag_too_small": "too_small",
+    "flag_extreme_aspect": "extreme_aspect",
+    "flag_blurry": "blurry",
+    "flag_low_entropy": "low_entropy",
+    "flag_near_mono": "near_monochrome",
+    "flag_too_dark": "too_dark",
+    "flag_too_bright": "too_bright",
+    "flag_low_saturation": "low_saturation",
+    "flag_low_chroma": "low_chroma",
+    "flag_low_center_saliency": "low_center_saliency",
+    "flag_compression_artifact": "compression_artifact",
+}
+
+_FLAG_COLUMNS = tuple(_REASON_MAP.keys())
+
+_QUALITY_WEIGHTS: dict[str, float] = {
+    "min_side": 0.10,
+    "blur_laplacian": 0.18,
+    "entropy": 0.16,
+    "mean_sat": 0.08,
+    "chroma_mean": 0.08,
+    "center_saliency_ratio": 0.10,
+    "aspect_extremity": 0.08,
+    "near_mono_ratio": 0.08,
+    "dark_ratio": 0.04,
+    "bright_ratio": 0.04,
+    "compression_artifact": 0.06,
+}
+
+_HIGHER_IS_BETTER = (
+    "min_side",
+    "blur_laplacian",
+    "entropy",
+    "mean_sat",
+    "chroma_mean",
+    "center_saliency_ratio",
+)
+
+_LOWER_IS_BETTER = (
+    "aspect_extremity",
+    "near_mono_ratio",
+    "dark_ratio",
+    "bright_ratio",
+    "compression_artifact",
+)
+
+
+# -----------------------------------------------------------------------------
+# Small internal helpers
+# -----------------------------------------------------------------------------
+
+
+@dataclass
 class _UnionFind:
-    def __init__(self, n: int):
-        self.parent = list(range(n))
-        self.rank = [0] * n
+    """Minimal union-find implementation used for duplicate clustering."""
 
-    def find(self, x: int) -> int:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
+    parent: dict[Hashable, Hashable]
+    rank: dict[Hashable, int]
 
-    def union(self, a: int, b: int) -> None:
-        ra = self.find(a)
-        rb = self.find(b)
-        if ra == rb:
+    @classmethod
+    def from_items(cls, items: Iterable[Hashable]) -> "_UnionFind":
+        item_list = list(items)
+        return cls(
+            parent={item: item for item in item_list},
+            rank={item: 0 for item in item_list},
+        )
+
+    def find(self, item: Hashable) -> Hashable:
+        """Return the representative item for a set."""
+        if self.parent[item] != item:
+            self.parent[item] = self.find(self.parent[item])
+        return self.parent[item]
+
+    def union(self, left: Hashable, right: Hashable) -> None:
+        """Merge the two sets containing ``left`` and ``right``."""
+        left_root = self.find(left)
+        right_root = self.find(right)
+        if left_root == right_root:
             return
-        if self.rank[ra] < self.rank[rb]:
-            self.parent[ra] = rb
-        elif self.rank[ra] > self.rank[rb]:
-            self.parent[rb] = ra
-        else:
-            self.parent[rb] = ra
-            self.rank[ra] += 1
+
+        if self.rank[left_root] < self.rank[right_root]:
+            left_root, right_root = right_root, left_root
+
+        self.parent[right_root] = left_root
+        if self.rank[left_root] == self.rank[right_root]:
+            self.rank[left_root] += 1
 
 
-def _hamming_distance_hex(hash_a: str | None, hash_b: str | None) -> int:
-    if hash_a is None or hash_b is None:
-        return 10**9
+def _boolean_series(index: pd.Index, value: bool = False) -> pd.Series:
+    """Create a boolean series aligned with ``index``."""
+    return pd.Series(value, index=index, dtype=bool)
+
+
+def _numeric_series(
+    df: pd.DataFrame,
+    column: str,
+    default: float = np.nan,
+) -> pd.Series:
+    """Return a numeric column aligned to ``df.index`` or a default series."""
+    if column not in df.columns:
+        return pd.Series(default, index=df.index, dtype="float64")
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def _config_float(config: Mapping[str, Any], key: str, default: float) -> float:
+    """Read a numeric threshold from a config with a safe default."""
+    value = config.get(key, default)
+    if value is None:
+        return default
     try:
-        return (int(str(hash_a), 16) ^ int(str(hash_b), 16)).bit_count()
-    except Exception:
-        return 10**9
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _config_int(config: Mapping[str, Any], key: str, default: int) -> int:
+    """Read an integer value from a config with a safe default."""
+    value = config.get(key, default)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _rank_score(df: pd.DataFrame, col: str, ascending: bool = True) -> pd.Series:
+    """Return percentile rank scores in [0, 1] for a quality metric."""
+    if df.empty:
+        return pd.Series(dtype="float64", index=df.index)
+
     if col not in df.columns:
-        return pd.Series(0.0, index=df.index)
+        return pd.Series(0.5, index=df.index, dtype="float64")
 
-    values = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    values = pd.to_numeric(df[col], errors="coerce")
     if values.notna().sum() == 0:
-        return pd.Series(0.0, index=df.index)
+        return pd.Series(0.5, index=df.index, dtype="float64")
 
-    return values.rank(pct=True, ascending=ascending).fillna(0.0)
+    values = values.fillna(values.median())
+    return values.rank(method="average", pct=True, ascending=ascending).astype(float)
 
 
-def compute_quality_score(audit_df: pd.DataFrame) -> pd.Series:
-    """Compute a relative quality score used for duplicate representative choice."""
+def _valid_hex_hash(value: Any) -> str | None:
+    """Normalize a perceptual hash value to a lowercase hexadecimal string."""
+    if value is None or pd.isna(value):
+        return None
 
-    df = audit_df.copy()
-    score = (
-        _rank_score(df, "blur_laplacian", ascending=True)
-        + _rank_score(df, "entropy", ascending=True)
-        + _rank_score(df, "min_side", ascending=True)
-        + _rank_score(df, "brightness_std", ascending=True)
-        + _rank_score(df, "center_saliency_ratio", ascending=True)
-        - _rank_score(df, "compression_artifact", ascending=True)
-    )
+    text = str(value).strip().lower()
+    if not text:
+        return None
 
-    if "is_corrupted" in df.columns:
-        score = score - df["is_corrupted"].fillna(False).astype(int) * 10
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
 
-    return score
+    return text
+
+
+def _hamming_distance_hex(hash_a: Any, hash_b: Any) -> int:
+    """Compute Hamming distance between two hexadecimal hash strings."""
+    left = _valid_hex_hash(hash_a)
+    right = _valid_hex_hash(hash_b)
+    if left is None or right is None:
+        return 10**9
+
+    width = max(len(left), len(right))
+    left_int = int(left.zfill(width), 16)
+    right_int = int(right.zfill(width), 16)
+    return int((left_int ^ right_int).bit_count())
+
+
+def _add_false_flags(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with all known cleaning flag columns set to False."""
+    result = df.copy()
+    for column in _FLAG_COLUMNS:
+        result[column] = False
+    return result
+
+
+def _ensure_duplicate_columns(
+    audit_df: pd.DataFrame,
+    cleaning_config: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Return a dataframe with duplicate-decision columns when requested."""
+    required = {
+        "is_near_duplicate",
+        "is_duplicate_representative",
+        "is_duplicate_to_remove",
+    }
+
+    if not bool(cleaning_config.get("remove_duplicates", False)):
+        return audit_df.copy()
+
+    if required.issubset(audit_df.columns):
+        return audit_df.copy()
+
+    threshold = _config_int(cleaning_config, "duplicate_hamming_threshold", 4)
+    return mark_near_duplicates(audit_df, hamming_threshold=threshold)
+
+
+def _select_duplicate_representative(group_frame: pd.DataFrame) -> Hashable:
+    """Choose the best representative index for one duplicate group."""
+    sort_frame = group_frame.copy()
+    by = ["quality_score"]
+    ascending = [False]
+
+    if "path" in sort_frame.columns:
+        sort_frame["_path_sort_key"] = sort_frame["path"].map(str)
+        by.append("_path_sort_key")
+        ascending.append(True)
+
+    return sort_frame.sort_values(by=by, ascending=ascending, kind="mergesort").index[0]
+
+
+def _collect_row_reasons(row: pd.Series) -> list[str]:
+    """Collect ordered removal reasons from a row of flag columns."""
+    return [reason for flag, reason in _REASON_MAP.items() if bool(row.get(flag, False))]
+
+
+# -----------------------------------------------------------------------------
+# Quality score and duplicate detection
+# -----------------------------------------------------------------------------
+
+
+def compute_quality_score(audit_df: pd.DataFrame) -> pd.DataFrame:
+    """Add a deterministic ``quality_score`` column used for duplicate keepers.
+
+    Higher is better. The score is a lightweight heuristic for selecting the
+    best representative among near-duplicate images, not a model performance
+    metric.
+    """
+    result = audit_df.copy()
+    if result.empty:
+        result["quality_score"] = pd.Series(dtype="float64", index=result.index)
+        return result
+
+    components = pd.DataFrame(index=result.index)
+
+    for column in _HIGHER_IS_BETTER:
+        components[column] = _rank_score(result, column, ascending=True)
+
+    for column in _LOWER_IS_BETTER:
+        components[column] = _rank_score(result, column, ascending=False)
+
+    score = pd.Series(0.0, index=result.index, dtype="float64")
+    for column, weight in _QUALITY_WEIGHTS.items():
+        score = score + components.get(column, pd.Series(0.5, index=result.index)) * weight
+
+    if "is_corrupted" in result.columns:
+        corrupted = result["is_corrupted"].fillna(False).astype(bool)
+        score = score.mask(corrupted, -1.0)
+
+    result["quality_score"] = score.round(6)
+    return result
 
 
 def mark_near_duplicates(
@@ -77,239 +283,212 @@ def mark_near_duplicates(
     hash_col: str = "phash",
     bands: int = 8,
 ) -> pd.DataFrame:
-    """Detect near-duplicates from perceptual hashes and keep best representative."""
+    """Detect near-duplicate images using perceptual hashes.
 
-    if hash_col not in audit_df.columns:
-        raise KeyError(f"Hash column not found: {hash_col}")
+    Returns a copy with ``duplicate_cluster_id``, ``duplicate_group_size``,
+    ``is_near_duplicate``, ``is_duplicate_representative``, and
+    ``is_duplicate_to_remove``.
+    """
+    if hamming_threshold < 0:
+        raise ValueError("hamming_threshold must be non-negative.")
     if bands <= 0:
-        raise ValueError("bands must be a positive integer.")
+        raise ValueError("bands must be positive.")
 
-    df = audit_df.copy().reset_index(drop=True)
-    n = len(df)
+    result = compute_quality_score(audit_df)
 
-    hashes = df[hash_col].astype(object).where(df[hash_col].notna(), None).tolist()
-    valid_hash = np.array([isinstance(h, str) and len(h) > 0 for h in hashes])
+    defaults: dict[str, Any] = {
+        "duplicate_cluster_id": -1,
+        "duplicate_group_size": 1,
+        "is_near_duplicate": False,
+        "is_duplicate_representative": False,
+        "is_duplicate_to_remove": False,
+    }
+    for column, default in defaults.items():
+        result[column] = default
 
-    uf = _UnionFind(n)
-    buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
-    bits_per_band = max(1, 64 // bands)
+    if result.empty or hash_col not in result.columns:
+        return result
 
-    for i, hash_value in enumerate(hashes):
-        if not valid_hash[i]:
-            continue
-        try:
-            value = int(hash_value, 16)
-        except Exception:
-            continue
+    valid_hashes: dict[Hashable, str] = {}
+    for idx, value in result[hash_col].items():
+        normalized = _valid_hex_hash(value)
+        if normalized is not None:
+            valid_hashes[idx] = normalized
 
+    if len(valid_hashes) < 2:
+        return result
+
+    uf = _UnionFind.from_items(valid_hashes.keys())
+    buckets: dict[tuple[int, str], list[Hashable]] = defaultdict(list)
+
+    for idx, hash_value in valid_hashes.items():
+        chunk_size = max(1, int(np.ceil(len(hash_value) / bands)))
         for band_idx in range(bands):
-            shift = band_idx * bits_per_band
-            band_value = (value >> shift) & ((1 << bits_per_band) - 1)
-            buckets[(band_idx, band_value)].append(i)
+            start = band_idx * chunk_size
+            if start >= len(hash_value):
+                break
+            buckets[(band_idx, hash_value[start : start + chunk_size])].append(idx)
 
-    candidate_pairs: set[tuple[int, int]] = set()
-    for idx_list in buckets.values():
-        if len(idx_list) < 2:
+    compared_pairs: set[frozenset[Hashable]] = set()
+    for bucket_indices in buckets.values():
+        if len(bucket_indices) < 2:
             continue
-        for a, b in combinations(idx_list, 2):
-            candidate_pairs.add((min(a, b), max(a, b)))
 
-    for a, b in candidate_pairs:
-        if _hamming_distance_hex(hashes[a], hashes[b]) <= hamming_threshold:
-            uf.union(a, b)
+        for left_pos, left_idx in enumerate(bucket_indices[:-1]):
+            for right_idx in bucket_indices[left_pos + 1 :]:
+                pair = frozenset((left_idx, right_idx))
+                if pair in compared_pairs:
+                    continue
+                compared_pairs.add(pair)
 
-    clusters = np.array([uf.find(i) for i in range(n)])
-    quality = compute_quality_score(df)
+                distance = _hamming_distance_hex(valid_hashes[left_idx], valid_hashes[right_idx])
+                if distance <= hamming_threshold:
+                    uf.union(left_idx, right_idx)
 
-    representatives = np.zeros(n, dtype=bool)
-    group_df = pd.DataFrame(
-        {
-            "idx": np.arange(n),
-            "cluster": clusters,
-            "quality": quality.values,
-            "has_valid_hash": valid_hash,
-        }
+    groups: dict[Hashable, list[Hashable]] = defaultdict(list)
+    for idx in valid_hashes:
+        groups[uf.find(idx)].append(idx)
+
+    cluster_id = 0
+    for group_indices in groups.values():
+        if len(group_indices) < 2:
+            continue
+
+        cluster_id += 1
+        group_frame = result.loc[group_indices]
+        representative_idx = _select_duplicate_representative(group_frame)
+        duplicate_indices = [idx for idx in group_indices if idx != representative_idx]
+
+        result.loc[group_indices, "duplicate_cluster_id"] = cluster_id
+        result.loc[group_indices, "duplicate_group_size"] = len(group_indices)
+        result.loc[group_indices, "is_near_duplicate"] = True
+        result.loc[representative_idx, "is_duplicate_representative"] = True
+        result.loc[duplicate_indices, "is_duplicate_to_remove"] = True
+
+    return result
+
+
+# -----------------------------------------------------------------------------
+# Cleaning flags and decisions
+# -----------------------------------------------------------------------------
+
+
+def compute_soft_flags(
+    audit_df: pd.DataFrame,
+    cleaning_config: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Add threshold-based cleaning flags without dropping rows.
+
+    Missing metric columns are treated as non-failing. If
+    ``cleaning_config['enabled']`` is False, all flags are set to False.
+    """
+    result = audit_df.copy()
+    if result.empty:
+        return _add_false_flags(result)
+
+    enabled = bool(cleaning_config.get("enabled", True))
+    if not enabled:
+        return _add_false_flags(result)
+
+    index = result.index
+    corrupted = result.get("is_corrupted", _boolean_series(index, False)).fillna(False).astype(bool)
+    duplicate = result.get("is_duplicate_to_remove", _boolean_series(index, False)).fillna(False).astype(bool)
+
+    result["flag_corrupted"] = corrupted & bool(cleaning_config.get("remove_corrupted", True))
+    result["flag_duplicate"] = duplicate & bool(cleaning_config.get("remove_duplicates", False))
+
+    result["flag_too_small"] = _numeric_series(result, "min_side") < _config_float(
+        cleaning_config, "min_side", -np.inf
     )
+    result["flag_extreme_aspect"] = _numeric_series(result, "aspect_extremity") > _config_float(
+        cleaning_config, "max_aspect_extremity", np.inf
+    )
+    result["flag_blurry"] = _numeric_series(result, "blur_laplacian") < _config_float(
+        cleaning_config, "min_blur_laplacian", -np.inf
+    )
+    result["flag_low_entropy"] = _numeric_series(result, "entropy") < _config_float(
+        cleaning_config, "min_entropy", -np.inf
+    )
+    result["flag_near_mono"] = _numeric_series(result, "near_mono_ratio") > _config_float(
+        cleaning_config, "max_near_mono_ratio", np.inf
+    )
+    result["flag_too_dark"] = _numeric_series(result, "dark_ratio") > _config_float(
+        cleaning_config, "max_dark_ratio", np.inf
+    )
+    result["flag_too_bright"] = _numeric_series(result, "bright_ratio") > _config_float(
+        cleaning_config, "max_bright_ratio", np.inf
+    )
+    result["flag_low_saturation"] = _numeric_series(result, "mean_sat") < _config_float(
+        cleaning_config, "min_mean_sat", -np.inf
+    )
+    result["flag_low_chroma"] = _numeric_series(result, "chroma_mean") < _config_float(
+        cleaning_config, "min_chroma_mean", -np.inf
+    )
+    result["flag_low_center_saliency"] = _numeric_series(
+        result, "center_saliency_ratio"
+    ) < _config_float(cleaning_config, "min_center_saliency_ratio", -np.inf)
+    result["flag_compression_artifact"] = _numeric_series(
+        result, "compression_artifact"
+    ) > _config_float(cleaning_config, "max_compression_artifact", np.inf)
 
-    for _, group in group_df.groupby("cluster"):
-        if len(group) == 1:
-            representatives[int(group["idx"].iloc[0])] = True
-            continue
-
-        valid = group[group["has_valid_hash"]]
-        if len(valid) == 0:
-            representatives[int(group["idx"].iloc[0])] = True
-            continue
-
-        best_idx = int(valid.sort_values("quality", ascending=False)["idx"].iloc[0])
-        representatives[best_idx] = True
-
-    size_map = pd.Series(clusters).value_counts().to_dict()
-    group_sizes = np.array([size_map[c] for c in clusters])
-
-    df["duplicate_cluster"] = clusters
-    df["duplicate_group_size"] = group_sizes
-    df["is_duplicate_representative"] = representatives
-    df["is_duplicate"] = (group_sizes > 1) & (~representatives)
-
-    return df
-
-
-def compute_soft_flags(audit_df: pd.DataFrame, cleaning_config: dict) -> pd.DataFrame:
-    """Compute warning flags and soft_flag_count from configured thresholds."""
-
-    df = audit_df.copy()
-    flags = pd.DataFrame(index=df.index)
-
-    def lower(col: str, key: str, flag_name: str) -> None:
-        threshold = cleaning_config.get(key)
-        if threshold is not None and col in df.columns:
-            flags[flag_name] = pd.to_numeric(df[col], errors="coerce") < threshold
-        else:
-            flags[flag_name] = False
-
-    def upper(col: str, key: str, flag_name: str) -> None:
-        threshold = cleaning_config.get(key)
-        if threshold is not None and col in df.columns:
-            flags[flag_name] = pd.to_numeric(df[col], errors="coerce") > threshold
-        else:
-            flags[flag_name] = False
-
-    lower("entropy", "entropy_min", "soft_low_entropy")
-    lower("mean_sat", "mean_sat_min", "soft_low_saturation")
-    lower("center_saliency_ratio", "center_saliency_ratio_min", "soft_low_saliency")
-    lower("brightness_std", "brightness_std_min", "soft_low_brightness_std")
-    lower("chroma_mean", "chroma_mean_min", "soft_low_chroma")
-
-    upper("compression_artifact", "compression_artifact_max", "soft_high_compression_artifact")
-    upper("brightness_std", "brightness_std_max", "soft_high_brightness_std")
-
-    flags = flags.fillna(False).astype(bool)
-    flags["soft_flag_count"] = flags.sum(axis=1)
-
-    return flags
+    result[list(_FLAG_COLUMNS)] = result[list(_FLAG_COLUMNS)].fillna(False).astype(bool)
+    return result
 
 
-def build_cleaning_mask(audit_df: pd.DataFrame, cleaning_config: dict) -> pd.Series:
-    """Build keep/remove boolean mask where True means kept and False means removed."""
+def build_cleaning_mask(
+    audit_df: pd.DataFrame,
+    cleaning_config: Mapping[str, Any],
+) -> pd.Series:
+    """Return a boolean keep-mask where True means the image is retained."""
+    if audit_df.empty:
+        return pd.Series(dtype=bool, index=audit_df.index)
 
-    df = audit_df.copy()
-    keep = pd.Series(True, index=df.index)
-
-    if cleaning_config.get("remove_corrupted", True) and "is_corrupted" in df.columns:
-        keep &= ~df["is_corrupted"].fillna(False).astype(bool)
-
-    if cleaning_config.get("remove_duplicates", True) and "is_duplicate" in df.columns:
-        keep &= ~df["is_duplicate"].fillna(False).astype(bool)
-
-    if cleaning_config.get("blur_laplacian_min") is not None and "blur_laplacian" in df.columns:
-        keep &= pd.to_numeric(df["blur_laplacian"], errors="coerce") >= cleaning_config["blur_laplacian_min"]
-
-    if cleaning_config.get("min_side_min") is not None and "min_side" in df.columns:
-        keep &= pd.to_numeric(df["min_side"], errors="coerce") >= cleaning_config["min_side_min"]
-
-    if cleaning_config.get("aspect_extremity_max") is not None and "aspect_extremity" in df.columns:
-        keep &= pd.to_numeric(df["aspect_extremity"], errors="coerce") <= cleaning_config["aspect_extremity_max"]
-
-    if cleaning_config.get("near_mono_ratio_max") is not None and "near_mono_ratio" in df.columns:
-        keep &= pd.to_numeric(df["near_mono_ratio"], errors="coerce") <= cleaning_config["near_mono_ratio_max"]
-
-    entropy_near_mono_max = cleaning_config.get("entropy_near_mono_max")
-
-    if cleaning_config.get("dark_ratio_max") is not None and "dark_ratio" in df.columns:
-        dark_bad = pd.to_numeric(df["dark_ratio"], errors="coerce") > cleaning_config["dark_ratio_max"]
-        if entropy_near_mono_max is not None and "entropy" in df.columns:
-            dark_bad &= pd.to_numeric(df["entropy"], errors="coerce") < entropy_near_mono_max
-        keep &= ~dark_bad.fillna(False)
-
-    if cleaning_config.get("bright_ratio_max") is not None and "bright_ratio" in df.columns:
-        bright_bad = pd.to_numeric(df["bright_ratio"], errors="coerce") > cleaning_config["bright_ratio_max"]
-        if entropy_near_mono_max is not None and "entropy" in df.columns:
-            bright_bad &= pd.to_numeric(df["entropy"], errors="coerce") < entropy_near_mono_max
-        keep &= ~bright_bad.fillna(False)
-
-    max_soft_flags = cleaning_config.get("max_soft_flags")
-    if max_soft_flags is not None:
-        soft_flags = compute_soft_flags(df, cleaning_config)
-        keep &= soft_flags["soft_flag_count"] <= int(max_soft_flags)
-
-    return keep.fillna(False).astype(bool)
+    working_df = _ensure_duplicate_columns(audit_df, cleaning_config)
+    flagged_df = compute_soft_flags(working_df, cleaning_config)
+    remove_mask = flagged_df[list(_FLAG_COLUMNS)].any(axis=1).astype(bool)
+    return (~remove_mask).reindex(audit_df.index, fill_value=True)
 
 
-def assign_removal_reasons(audit_df: pd.DataFrame, cleaning_config: dict) -> pd.DataFrame:
-    """Add is_kept, soft_flag_count, and removal_reason columns."""
+def assign_removal_reasons(
+    audit_df: pd.DataFrame,
+    cleaning_config: Mapping[str, Any],
+) -> pd.DataFrame:
+    """Add ``keep``, ``removal_reason``, and ``removal_reasons`` columns."""
+    working_df = _ensure_duplicate_columns(audit_df, cleaning_config)
+    result = compute_soft_flags(working_df, cleaning_config)
 
-    df = audit_df.copy()
-    keep = build_cleaning_mask(df, cleaning_config)
-    soft = compute_soft_flags(df, cleaning_config)
-
-    df["is_kept"] = keep.values
-    df["soft_flag_count"] = soft["soft_flag_count"].astype(int).values
-
-    reasons: list[str] = []
-    for i, row in df.iterrows():
-        if bool(keep.loc[i]):
-            reasons.append("kept")
-            continue
-
-        row_reasons: list[str] = []
-
-        if cleaning_config.get("remove_corrupted", True) and bool(row.get("is_corrupted", False)):
-            row_reasons.append("corrupted")
-
-        if cleaning_config.get("remove_duplicates", True) and bool(row.get("is_duplicate", False)):
-            row_reasons.append("near_duplicate")
-
-        if cleaning_config.get("blur_laplacian_min") is not None and row.get("blur_laplacian", np.inf) < cleaning_config["blur_laplacian_min"]:
-            row_reasons.append("blurry")
-
-        if cleaning_config.get("min_side_min") is not None and row.get("min_side", np.inf) < cleaning_config["min_side_min"]:
-            row_reasons.append("undersized")
-
-        if cleaning_config.get("aspect_extremity_max") is not None and row.get("aspect_extremity", 0) > cleaning_config["aspect_extremity_max"]:
-            row_reasons.append("extreme_aspect_ratio")
-
-        if cleaning_config.get("near_mono_ratio_max") is not None and row.get("near_mono_ratio", 0) > cleaning_config["near_mono_ratio_max"]:
-            row_reasons.append("near_monochrome")
-
-        entropy_near_mono_max = cleaning_config.get("entropy_near_mono_max")
-
-        if cleaning_config.get("dark_ratio_max") is not None:
-            dark_bad = row.get("dark_ratio", 0) > cleaning_config["dark_ratio_max"]
-            if entropy_near_mono_max is not None:
-                dark_bad = dark_bad and row.get("entropy", np.inf) < entropy_near_mono_max
-            if dark_bad:
-                row_reasons.append("near_mono_dark")
-
-        if cleaning_config.get("bright_ratio_max") is not None:
-            bright_bad = row.get("bright_ratio", 0) > cleaning_config["bright_ratio_max"]
-            if entropy_near_mono_max is not None:
-                bright_bad = bright_bad and row.get("entropy", np.inf) < entropy_near_mono_max
-            if bright_bad:
-                row_reasons.append("near_mono_bright")
-
-        max_soft_flags = cleaning_config.get("max_soft_flags")
-        if max_soft_flags is not None and int(soft.loc[i, "soft_flag_count"]) > int(max_soft_flags):
-            row_reasons.append(f"too_many_soft_flags_{int(soft.loc[i, 'soft_flag_count'])}")
-
-        reasons.append(", ".join(row_reasons) if row_reasons else "removed_by_combined_rule")
-
-    df["removal_reason"] = reasons
-
-    for col in soft.columns:
-        if col != "soft_flag_count":
-            df[col] = soft[col].values
-
-    return df
+    row_reasons = result.apply(_collect_row_reasons, axis=1)
+    result["keep"] = row_reasons.map(len).eq(0)
+    result["removal_reason"] = row_reasons.map(lambda reasons: reasons[0] if reasons else "kept")
+    result["removal_reasons"] = row_reasons.map(lambda reasons: "|".join(reasons))
+    return result
 
 
-def apply_cleaning(audit_df: pd.DataFrame, cleaning_config: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Apply cleaning rules and return kept and removed dataframes."""
+def apply_cleaning(
+    audit_df: pd.DataFrame,
+    cleaning_config: Mapping[str, Any],
+    reset_index: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply a cleaning policy and return ``(clean_df, removed_df)``.
 
+    The input dataframe is never mutated. By default, original indices are
+    preserved so cleaned/removed rows remain traceable to the audit dataframe.
+    """
     decision_df = assign_removal_reasons(audit_df, cleaning_config)
-    clean_df = decision_df[decision_df["is_kept"]].copy().reset_index(drop=True)
-    removed_df = decision_df[~decision_df["is_kept"]].copy().reset_index(drop=True)
+
+    clean_df = decision_df[decision_df["keep"]].copy()
+    removed_df = decision_df[~decision_df["keep"]].copy()
+
+    if reset_index:
+        clean_df = clean_df.reset_index(drop=True)
+        removed_df = removed_df.reset_index(drop=True)
+
     return clean_df, removed_df
+
+
+# -----------------------------------------------------------------------------
+# Summaries
+# -----------------------------------------------------------------------------
 
 
 def summarize_cleaning(
@@ -318,100 +497,154 @@ def summarize_cleaning(
     removed_df: pd.DataFrame,
     label_col: str = "label_name",
 ) -> pd.DataFrame:
-    """Summarize total and class-level proportions before/after cleaning."""
+    """Summarize before/after cleaning counts and removal rates by class."""
+    for frame_name, frame in (("raw_df", raw_df), ("clean_df", clean_df), ("removed_df", removed_df)):
+        if not frame.empty and label_col not in frame.columns:
+            raise KeyError(f"{label_col!r} not found in {frame_name}.")
 
-    groups = [
-        ("before_cleaning", raw_df),
-        ("after_cleaning", clean_df),
-        ("removed", removed_df),
-    ]
+    labels = sorted(
+        set(raw_df[label_col].dropna().unique() if label_col in raw_df.columns else [])
+        | set(clean_df[label_col].dropna().unique() if label_col in clean_df.columns else [])
+        | set(removed_df[label_col].dropna().unique() if label_col in removed_df.columns else []),
+        key=str,
+    )
 
-    all_classes: list[str] = []
-    for _, group_df in groups:
-        if label_col in group_df.columns:
-            all_classes.extend(group_df[label_col].dropna().astype(str).unique().tolist())
-    classes = sorted(set(all_classes))
+    total_before = int(len(raw_df))
+    total_after = int(len(clean_df))
+    rows: list[dict[str, Any]] = []
 
-    records: list[dict] = []
-    for group_name, group_df in groups:
-        total = len(group_df)
-        row = {"group": group_name, "total": int(total)}
+    for label in labels:
+        before = int((raw_df[label_col] == label).sum()) if label_col in raw_df.columns else 0
+        after = int((clean_df[label_col] == label).sum()) if label_col in clean_df.columns else 0
+        removed = int((removed_df[label_col] == label).sum()) if label_col in removed_df.columns else before - after
 
-        if label_col in group_df.columns and total > 0:
-            counts = group_df[label_col].value_counts().to_dict()
-        else:
-            counts = {}
+        rows.append(
+            {
+                label_col: label,
+                "count_before": before,
+                "count_after": after,
+                "count_removed": removed,
+                "pct_before": round(before / total_before * 100, 2) if total_before else 0.0,
+                "pct_after": round(after / total_after * 100, 2) if total_after else 0.0,
+                "removal_rate_pct": round(removed / before * 100, 2) if before else 0.0,
+            }
+        )
 
-        for class_name in classes:
-            count = int(counts.get(class_name, 0))
-            key = str(class_name).lower().replace(" ", "_")
-            row[key] = count
-            row[f"{key}_pct"] = (count / total * 100.0) if total > 0 else 0.0
+    rows.append(
+        {
+            label_col: "TOTAL",
+            "count_before": total_before,
+            "count_after": total_after,
+            "count_removed": int(len(removed_df)),
+            "pct_before": 100.0 if total_before else 0.0,
+            "pct_after": 100.0 if total_after else 0.0,
+            "removal_rate_pct": round(len(removed_df) / total_before * 100, 2) if total_before else 0.0,
+        }
+    )
 
-        records.append(row)
-
-    summary = pd.DataFrame(records)
-    original = max(int(summary.loc[summary["group"] == "before_cleaning", "total"].iloc[0]), 1)
-    summary["pct_of_original"] = summary["total"] / original * 100.0
-
-    return summary
+    return pd.DataFrame(rows)
 
 
 def summarize_removal_reasons(
     removed_df: pd.DataFrame,
-    reason_col: str = "removal_reason",
+    reason_col: str | None = None,
 ) -> pd.DataFrame:
-    """Summarize removal reasons as count and percentage."""
+    """Summarize removal reasons by count and percentage of removed rows.
 
-    if len(removed_df) == 0:
-        return pd.DataFrame(columns=["reason", "count", "percentage"])
+    If a pipe-delimited reason column is used, each reason is counted once, so
+    percentages may sum to more than 100%.
+    """
+    columns = ["removal_reason", "count", "percentage"]
+    if removed_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    if reason_col is None:
+        reason_col = "removal_reasons" if "removal_reasons" in removed_df.columns else "removal_reason"
 
     if reason_col not in removed_df.columns:
-        raise KeyError(f"reason_col not found: {reason_col}")
+        raise KeyError(f"reason_col not found in removed_df: {reason_col}")
 
-    counter: dict[str, int] = defaultdict(int)
-    for value in removed_df[reason_col].fillna("unknown"):
-        for reason in str(value).split(","):
-            reason = reason.strip()
-            if reason:
-                counter[reason] += 1
+    reasons: list[str] = []
+    for value in removed_df[reason_col].fillna(""):
+        text = str(value).strip()
+        if not text or text == "kept":
+            continue
+        reasons.extend(reason for reason in text.split("|") if reason)
 
-    summary = pd.DataFrame(
-        [{"reason": reason, "count": count} for reason, count in counter.items()]
-    ).sort_values("count", ascending=False)
+    if not reasons:
+        return pd.DataFrame(columns=columns)
 
-    summary["percentage"] = summary["count"] / len(removed_df) * 100.0
-    return summary.reset_index(drop=True)
+    counts = pd.Series(reasons).value_counts().sort_values(ascending=False)
+    summary = counts.rename_axis("removal_reason").reset_index(name="count")
+    summary["percentage"] = (summary["count"] / len(removed_df) * 100).round(2)
+    return summary
 
 
 def evaluate_cleaning_retention(
     raw_df: pd.DataFrame,
     clean_df: pd.DataFrame,
     label_col: str = "label",
-) -> dict:
-    """Compute retention/removal rates and class-balance shift."""
+) -> dict[str, Any]:
+    """Compute retention, removal, and class-balance shift after cleaning."""
+    if not raw_df.empty and label_col not in raw_df.columns:
+        raise KeyError(f"label_col not found in raw_df: {label_col}")
+    if not clean_df.empty and label_col not in clean_df.columns:
+        raise KeyError(f"label_col not found in clean_df: {label_col}")
 
-    n_raw = len(raw_df)
-    n_clean = len(clean_df)
+    raw_n = int(len(raw_df))
+    clean_n = int(len(clean_df))
+    removed_n = raw_n - clean_n
 
-    if n_raw == 0:
-        raise ValueError("raw_df is empty.")
+    if raw_n == 0:
+        return {
+            "n_before": 0,
+            "n_after": clean_n,
+            "n_removed": 0,
+            "retention_rate": 0.0,
+            "removal_rate": 0.0,
+            "retention_pct": 0.0,
+            "removal_pct": 0.0,
+            "class_balance_shift": 0.0,
+            "class_balance_shift_pct": 0.0,
+        }
 
-    raw_ratio = pd.to_numeric(raw_df[label_col], errors="coerce").mean() if label_col in raw_df.columns else np.nan
-    clean_ratio = pd.to_numeric(clean_df[label_col], errors="coerce").mean() if label_col in clean_df.columns and n_clean > 0 else np.nan
+    raw_props = raw_df[label_col].value_counts(normalize=True, dropna=False)
+    clean_props = (
+        clean_df[label_col].value_counts(normalize=True, dropna=False)
+        if clean_n
+        else pd.Series(dtype=float)
+    )
+    all_labels = sorted(set(raw_props.index).union(set(clean_props.index)), key=str)
 
-    if pd.isna(raw_ratio) or pd.isna(clean_ratio):
-        balance_shift = np.nan
-    else:
-        balance_shift = abs(float(clean_ratio) - float(raw_ratio))
+    class_balance_shift = max(
+        (abs(float(clean_props.get(label, 0.0)) - float(raw_props.get(label, 0.0))) for label in all_labels),
+        default=0.0,
+    )
+
+    retention_rate = clean_n / raw_n
+    removal_rate = removed_n / raw_n
 
     return {
-        "n_raw": int(n_raw),
-        "n_clean": int(n_clean),
-        "n_removed": int(n_raw - n_clean),
-        "retention_rate": float(n_clean / n_raw),
-        "removal_rate": float((n_raw - n_clean) / n_raw),
-        "raw_positive_ratio": float(raw_ratio) if not pd.isna(raw_ratio) else np.nan,
-        "clean_positive_ratio": float(clean_ratio) if not pd.isna(clean_ratio) else np.nan,
-        "class_balance_shift": float(balance_shift) if not pd.isna(balance_shift) else np.nan,
+        "n_before": raw_n,
+        "n_after": clean_n,
+        "n_removed": removed_n,
+        "retention_rate": round(retention_rate, 6),
+        "removal_rate": round(removal_rate, 6),
+        "retention_pct": round(retention_rate * 100, 2),
+        "removal_pct": round(removal_rate * 100, 2),
+        "class_balance_shift": round(class_balance_shift, 6),
+        "class_balance_shift_pct": round(class_balance_shift * 100, 2),
     }
+
+
+__all__ = [
+    "compute_quality_score",
+    "mark_near_duplicates",
+    "compute_soft_flags",
+    "build_cleaning_mask",
+    "assign_removal_reasons",
+    "apply_cleaning",
+    "summarize_cleaning",
+    "summarize_removal_reasons",
+    "evaluate_cleaning_retention",
+]
