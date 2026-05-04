@@ -1,7 +1,11 @@
+"""
+Visualization utilities for EDA, cleaning diagnostics, training, and evaluation.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,9 +14,70 @@ import seaborn as sns
 from PIL import Image
 
 
-def savefig(path: str | Path, dpi: int = 160, bbox_inches: str = "tight") -> Path:
-    """Save the current matplotlib figure and return its path."""
+# -----------------------------------------------------------------------------
+# Small helpers
+# -----------------------------------------------------------------------------
 
+
+def _ensure_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
+    """Raise KeyError when required dataframe columns are missing."""
+    missing = [column for column in columns if column not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required dataframe column(s): {missing}")
+
+
+def _as_numeric_series(df: pd.DataFrame, column: str) -> pd.Series:
+    """Return a dataframe column as numeric series."""
+    if column not in df.columns:
+        raise KeyError(f"Column not found in dataframe: {column}")
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def _read_rgb_image(path: str | Path) -> Image.Image | None:
+    """Read a path as an RGB PIL image, returning None when unreadable."""
+    try:
+        return Image.open(path).convert("RGB")
+    except Exception:
+        return None
+
+
+def _resolve_axes_array(axes: Any) -> np.ndarray:
+    """Return axes as a flat numpy array."""
+    return np.asarray(axes, dtype=object).reshape(-1)
+
+
+def _save_figure(fig: plt.Figure, save_path: str | Path | None, dpi: int = 160) -> Path | None:
+    """Save a figure if save_path is provided."""
+    if save_path is None:
+        return None
+
+    output = Path(save_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(output, dpi=dpi, bbox_inches="tight")
+    return output
+
+
+def _finalize_figure(
+    fig: plt.Figure,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> plt.Figure:
+    """Save/show a figure consistently and return it."""
+    _save_figure(fig, save_path)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def savefig(path: str | Path, dpi: int = 160, bbox_inches: str = "tight") -> Path:
+    """Save the current matplotlib figure and return its path.
+
+    This helper is kept for notebook compatibility. New plotting functions should
+    prefer their own ``save_path`` parameter.
+    """
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
@@ -20,143 +85,252 @@ def savefig(path: str | Path, dpi: int = 160, bbox_inches: str = "tight") -> Pat
     return output
 
 
+# -----------------------------------------------------------------------------
+# Generic image-grid plotting
+# -----------------------------------------------------------------------------
+
+
+def plot_image_grid_from_df(
+    df: pd.DataFrame,
+    n: int = 12,
+    path_col: str = "path",
+    title_col: str | None = None,
+    subtitle_cols: Sequence[str] | None = None,
+    filter_col: str | None = None,
+    filter_value: Any | None = None,
+    sort_by: str | None = None,
+    ascending: bool = True,
+    random_sample: bool = False,
+    seed: int = 42,
+    n_cols: int = 4,
+    figsize: tuple[float, float] | None = None,
+    suptitle: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Plot a generic image grid from a dataframe using a path column.
+
+    This replaces semantic duplicates such as ``plot_removed_examples`` and
+    ``plot_wrong_predictions``. The same generic function can plot removed
+    images, wrong predictions, extreme samples, or arbitrary dataframe samples.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive.")
+    if n_cols <= 0:
+        raise ValueError("n_cols must be positive.")
+
+    _ensure_columns(df, [path_col])
+    view_df = df.copy()
+
+    if filter_col is not None:
+        _ensure_columns(view_df, [filter_col])
+        if filter_value is not None:
+            view_df = view_df[
+                view_df[filter_col].astype(str).str.contains(str(filter_value), regex=False, na=False)
+            ]
+
+    if sort_by is not None:
+        _ensure_columns(view_df, [sort_by])
+        view_df = view_df.sort_values(sort_by, ascending=ascending)
+    elif random_sample:
+        view_df = view_df.sample(frac=1.0, random_state=seed)
+
+    view_df = view_df.head(n).copy()
+
+    if view_df.empty:
+        fig, ax = plt.subplots(1, 1, figsize=(4, 3))
+        ax.axis("off")
+        ax.text(0.5, 0.5, "No images to display", ha="center", va="center")
+        if suptitle:
+            fig.suptitle(suptitle, fontsize=14, fontweight="bold")
+        _finalize_figure(fig, save_path=save_path, show=show)
+        return fig, np.asarray([ax], dtype=object)
+
+    n_cols = min(n_cols, len(view_df))
+    n_rows = int(np.ceil(len(view_df) / n_cols))
+
+    if figsize is None:
+        figsize = (n_cols * 3.1, n_rows * 3.4)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    axes_flat = _resolve_axes_array(axes)
+
+    subtitle_cols = list(subtitle_cols or [])
+
+    for ax, (_, row) in zip(axes_flat, view_df.iterrows()):
+        image = _read_rgb_image(row[path_col])
+        if image is None:
+            ax.text(0.5, 0.5, "Unreadable", ha="center", va="center")
+        else:
+            ax.imshow(image)
+
+        ax.axis("off")
+
+        title_parts: list[str] = []
+        if title_col is not None and title_col in row:
+            title_parts.append(str(row[title_col]))
+
+        for col in subtitle_cols:
+            if col in row:
+                value = row[col]
+                if isinstance(value, float):
+                    value = f"{value:.4g}"
+                title_parts.append(f"{col}: {value}")
+
+        if title_parts:
+            ax.set_title("\n".join(title_parts), fontsize=8)
+
+    for ax in axes_flat[len(view_df):]:
+        ax.axis("off")
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=14, fontweight="bold")
+
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, axes_flat
+
+
+# -----------------------------------------------------------------------------
+# EDA plots
+# -----------------------------------------------------------------------------
+
+
 def plot_sample_grid(
-    df,
-    n_per_class=5,
-    path_col="path",
-    label_col="label_name",
-    class_order=None,
-    seed=42,
-    figsize=None,
-    save_path=None,
-):
+    df: pd.DataFrame,
+    n_per_class: int = 5,
+    path_col: str = "path",
+    label_col: str = "label_name",
+    class_order: Sequence[Any] | None = None,
+    seed: int = 42,
+    figsize: tuple[float, float] | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, np.ndarray]:
     """Plot sampled images by class."""
+    if n_per_class <= 0:
+        raise ValueError("n_per_class must be positive.")
+
+    _ensure_columns(df, [path_col, label_col])
 
     if class_order is None:
         class_order = sorted(df[label_col].dropna().unique().tolist())
 
-    if len(class_order) == 0:
-        return
+    if not class_order:
+        raise ValueError("No classes found to plot.")
 
     if figsize is None:
         figsize = (n_per_class * 2.4, len(class_order) * 2.4)
 
     fig, axes = plt.subplots(len(class_order), n_per_class, figsize=figsize)
+    axes_2d = np.asarray(axes, dtype=object)
 
     if len(class_order) == 1:
-        axes = np.array([axes])
-    axes = np.asarray(axes)
+        axes_2d = axes_2d.reshape(1, -1)
 
     for row_idx, class_name in enumerate(class_order):
         group = df[df[label_col] == class_name]
-        if len(group) == 0:
-            continue
-
-        sample = group.sample(n=min(n_per_class, len(group)), random_state=seed)
+        sample = group.sample(n=min(n_per_class, len(group)), random_state=seed) if len(group) else group
 
         for col_idx in range(n_per_class):
-            ax = axes[row_idx, col_idx]
+            ax = axes_2d[row_idx, col_idx]
 
             if col_idx >= len(sample):
                 ax.axis("off")
                 continue
 
-            path = sample.iloc[col_idx][path_col]
-            try:
-                img = Image.open(path).convert("RGB")
-                ax.imshow(img)
-            except Exception:
+            image = _read_rgb_image(sample.iloc[col_idx][path_col])
+            if image is None:
                 ax.text(0.5, 0.5, "Unreadable", ha="center", va="center")
+            else:
+                ax.imshow(image)
 
             ax.axis("off")
             if col_idx == 0:
                 ax.set_ylabel(str(class_name), fontsize=11, fontweight="bold")
 
-    plt.suptitle("Sample Images by Class", fontsize=14, fontweight="bold")
-
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    fig.suptitle("Sample Images by Class", fontsize=14, fontweight="bold")
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, axes_2d
 
 
 def plot_class_distribution_pie(
-    df,
-    label_col="label_name",
-    title="Class Distribution",
-    save_path=None,
-):
+    df: pd.DataFrame,
+    label_col: str = "label_name",
+    title: str = "Class Distribution",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
     """Plot class distribution as a pie chart with percentages."""
+    _ensure_columns(df, [label_col])
+    counts = df[label_col].value_counts(dropna=False).sort_index()
 
-    counts = df[label_col].value_counts().sort_index()
     if counts.empty:
-        return
+        raise ValueError("No class values to plot.")
 
-    plt.figure(figsize=(6, 6))
-    plt.pie(counts.values, labels=counts.index, autopct="%1.1f%%", startangle=90)
-    plt.title(title, fontweight="bold")
-    plt.axis("equal")
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.pie(counts.values, labels=counts.index.astype(str), autopct="%1.1f%%", startangle=90)
+    ax.set_title(title, fontweight="bold")
+    ax.axis("equal")
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
 def plot_class_distribution_bar(
-    df,
-    label_col="label_name",
-    title="Class Distribution",
-    save_path=None,
-):
+    df: pd.DataFrame,
+    label_col: str = "label_name",
+    title: str = "Class Distribution",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
     """Plot class distribution as a bar chart."""
+    _ensure_columns(df, [label_col])
+    counts = df[label_col].value_counts(dropna=False).sort_index()
 
-    counts = df[label_col].value_counts().sort_index()
     if counts.empty:
-        return
+        raise ValueError("No class values to plot.")
 
     total = counts.sum()
-
-    plt.figure(figsize=(7, 4))
-    bars = plt.bar(counts.index.astype(str), counts.values)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar(counts.index.astype(str), counts.values)
 
     for bar, count in zip(bars, counts.values):
-        pct = (count / total) * 100.0
-        plt.text(
+        pct = (count / total) * 100.0 if total else 0.0
+        ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height(),
-            f"{count}\n({pct:.1f}%)",
+            f"{int(count)}\n({pct:.1f}%)",
             ha="center",
             va="bottom",
             fontsize=9,
         )
 
-    plt.title(title, fontweight="bold")
-    plt.xlabel("Class")
-    plt.ylabel("Count")
-    plt.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.set_title(title, fontweight="bold")
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Count")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
 def plot_image_size_distribution(
-    audit_df,
-    width_col="width",
-    height_col="height",
-    label_col="label_name",
-    title="Raw Image Size Distribution",
-    save_path=None,
-):
+    audit_df: pd.DataFrame,
+    width_col: str = "width",
+    height_col: str = "height",
+    label_col: str = "label_name",
+    title: str = "Raw Image Size Distribution",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
     """Plot width-height scatter distribution."""
-
+    _ensure_columns(audit_df, [width_col, height_col])
     plot_df = audit_df.dropna(subset=[width_col, height_col]).copy()
-    if plot_df.empty:
-        return
 
-    plt.figure(figsize=(8, 6))
+    if plot_df.empty:
+        raise ValueError("No valid image-size rows to plot.")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
     sns.scatterplot(
         data=plot_df,
         x=width_col,
@@ -164,61 +338,70 @@ def plot_image_size_distribution(
         hue=label_col if label_col in plot_df.columns else None,
         alpha=0.45,
         s=28,
+        ax=ax,
     )
-    plt.title(title, fontweight="bold")
-    plt.xlabel("Width")
-    plt.ylabel("Height")
-    plt.grid(axis="both", linestyle="--", alpha=0.3)
+    ax.set_title(title, fontweight="bold")
+    ax.set_xlabel("Width")
+    ax.set_ylabel("Height")
+    ax.grid(axis="both", linestyle="--", alpha=0.3)
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
 def plot_rgb_channel_kde(
-    df,
-    sample_per_class=300,
-    path_col="path",
-    label_col="label_name",
-    class_order=None,
-    seed=42,
-    save_path=None,
-):
+    df: pd.DataFrame,
+    sample_per_class: int = 300,
+    path_col: str = "path",
+    label_col: str = "label_name",
+    class_order: Sequence[Any] | None = None,
+    seed: int = 42,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, np.ndarray]:
     """Plot KDE of per-image mean RGB channels by class."""
+    if sample_per_class <= 0:
+        raise ValueError("sample_per_class must be positive.")
+
+    _ensure_columns(df, [path_col, label_col])
 
     if class_order is None:
         class_order = sorted(df[label_col].dropna().unique().tolist())
 
-    if len(class_order) == 0:
-        return
+    if not class_order:
+        raise ValueError("No classes found to plot.")
 
     sampled_parts = []
     for class_name in class_order:
         group = df[df[label_col] == class_name]
-        if len(group) == 0:
-            continue
-        sampled_parts.append(group.sample(n=min(sample_per_class, len(group)), random_state=seed))
+        if len(group):
+            sampled_parts.append(group.sample(n=min(sample_per_class, len(group)), random_state=seed))
 
     if not sampled_parts:
-        return
+        raise ValueError("No samples available for RGB KDE.")
 
     sampled = pd.concat(sampled_parts, ignore_index=True)
 
-    def mean_rgb(path: str) -> tuple[float, float, float]:
-        try:
-            arr = np.asarray(Image.open(path).convert("RGB").resize((64, 64)))
-            return float(arr[:, :, 0].mean()), float(arr[:, :, 1].mean()), float(arr[:, :, 2].mean())
-        except Exception:
+    def mean_rgb(path: str | Path) -> tuple[float, float, float]:
+        image = _read_rgb_image(path)
+        if image is None:
             return np.nan, np.nan, np.nan
+        arr = np.asarray(image.resize((64, 64)))
+        return (
+            float(arr[:, :, 0].mean()),
+            float(arr[:, :, 1].mean()),
+            float(arr[:, :, 2].mean()),
+        )
 
-    sampled[["R_mean", "G_mean", "B_mean"]] = pd.DataFrame(sampled[path_col].apply(mean_rgb).tolist(), index=sampled.index)
+    sampled[["R_mean", "G_mean", "B_mean"]] = pd.DataFrame(
+        sampled[path_col].apply(mean_rgb).tolist(),
+        index=sampled.index,
+    )
 
     fig, axes = plt.subplots(1, len(class_order), figsize=(6 * len(class_order), 4.5))
-    if len(class_order) == 1:
-        axes = [axes]
+    axes_flat = _resolve_axes_array(axes)
 
-    for ax, class_name in zip(axes, class_order):
+    for ax, class_name in zip(axes_flat, class_order):
         part = sampled[sampled[label_col] == class_name].dropna(subset=["R_mean", "G_mean", "B_mean"])
         if part.empty:
             ax.axis("off")
@@ -233,32 +416,33 @@ def plot_rgb_channel_kde(
         ax.legend()
         ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    plt.suptitle("RGB Channel KDE by Class", fontsize=14, fontweight="bold")
+    fig.suptitle("RGB Channel KDE by Class", fontsize=14, fontweight="bold")
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, axes_flat
 
-    if save_path is not None:
-        savefig(save_path)
 
-    plt.show()
+# -----------------------------------------------------------------------------
+# Audit / cleaning diagnostic plots
+# -----------------------------------------------------------------------------
 
 
 def plot_metric_distribution(
-    audit_df,
+    audit_df: pd.DataFrame,
     metric: str,
-    label_col="label_name",
-    thresholds=None,
-    title=None,
-    save_path=None,
-):
-    """Plot one metric distribution, optionally with threshold lines."""
-
-    if metric not in audit_df.columns:
-        raise KeyError(f"Metric not found: {metric}")
-
+    label_col: str = "label_name",
+    thresholds: Sequence[float] | None = None,
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot one audit-metric distribution, optionally with threshold lines."""
+    _ensure_columns(audit_df, [metric])
     plot_df = audit_df.dropna(subset=[metric]).copy()
-    if plot_df.empty:
-        return
 
-    plt.figure(figsize=(8, 5))
+    if plot_df.empty:
+        raise ValueError(f"No valid rows to plot for metric: {metric}")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
     sns.kdeplot(
         data=plot_df,
         x=metric,
@@ -266,168 +450,171 @@ def plot_metric_distribution(
         fill=True,
         common_norm=False,
         alpha=0.2,
+        ax=ax,
     )
 
     if thresholds is not None:
         for value in thresholds:
-            plt.axvline(value, linestyle="--", linewidth=1.2)
+            ax.axvline(value, linestyle="--", linewidth=1.2)
 
-    plt.title(title or f"Distribution of {metric}", fontweight="bold")
-    plt.xlabel(metric)
-    plt.ylabel("Density")
-    plt.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.set_title(title or f"Distribution of {metric}", fontweight="bold")
+    ax.set_xlabel(metric)
+    ax.set_ylabel("Density")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
 def plot_metric_correlation_heatmap(
-    audit_df,
-    metrics: list[str],
-    title="Correlation Matrix of Image Quality Metrics",
-    save_path=None,
-):
+    audit_df: pd.DataFrame,
+    metrics: Sequence[str],
+    title: str = "Correlation Matrix of Image Quality Metrics",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
     """Plot correlation heatmap of selected audit metrics."""
-
     cols = [col for col in metrics if col in audit_df.columns]
     if not cols:
         raise ValueError("No valid metric columns were provided.")
 
-    corr = audit_df[cols].corr()
+    corr = audit_df[cols].apply(pd.to_numeric, errors="coerce").corr()
 
-    plt.figure(figsize=(max(8, len(cols) * 0.75), max(6, len(cols) * 0.65)))
-    sns.heatmap(corr, cmap="coolwarm", center=0, vmin=-1, vmax=1, annot=True, fmt=".2f", linewidths=0.5)
-    plt.title(title, fontweight="bold")
+    fig, ax = plt.subplots(figsize=(max(8, len(cols) * 0.75), max(6, len(cols) * 0.65)))
+    sns.heatmap(
+        corr,
+        cmap="coolwarm",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        annot=True,
+        fmt=".2f",
+        linewidths=0.5,
+        ax=ax,
+    )
+    ax.set_title(title, fontweight="bold")
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
-
-
-def plot_before_after_cleaning(summary_df, save_path=None):
-    """Plot class counts across before_cleaning/after_cleaning/removed groups."""
-
-    if "group" not in summary_df.columns:
-        raise KeyError("summary_df must include a 'group' column.")
-
-    value_cols = [c for c in summary_df.columns if c not in {"group", "total", "pct_of_original"} and not str(c).endswith("_pct")]
-    if not value_cols:
-        raise ValueError("No class-count columns found in summary_df.")
-
-    melted = summary_df.melt(id_vars="group", value_vars=value_cols, var_name="class", value_name="count")
-
-    plt.figure(figsize=(8, 5))
-    sns.barplot(data=melted, x="group", y="count", hue="class")
-    plt.title("Class Counts Before and After Cleaning", fontweight="bold")
-    plt.xlabel("")
-    plt.ylabel("Count")
-    plt.grid(axis="y", linestyle="--", alpha=0.35)
-
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
-def plot_removed_examples(
-    removed_df,
-    reason=None,
-    n=8,
-    path_col="path",
-    label_col="label_name",
-    reason_col="removal_reason",
-    seed=42,
-    save_path=None,
-):
-    """Plot removed-image examples, optionally filtered by reason substring."""
+def plot_before_after_cleaning(
+    summary_df: pd.DataFrame,
+    label_col: str = "label_name",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot class counts before/after cleaning from summarize_cleaning output."""
+    required = [label_col, "count_before", "count_after", "count_removed"]
+    _ensure_columns(summary_df, required)
 
-    view_df = removed_df.copy()
-    if reason is not None and reason_col in view_df.columns:
-        view_df = view_df[view_df[reason_col].astype(str).str.contains(str(reason), regex=False, na=False)]
+    plot_df = summary_df[summary_df[label_col].astype(str) != "TOTAL"].copy()
+    if plot_df.empty:
+        plot_df = summary_df.copy()
 
-    if view_df.empty:
-        return
+    melted = plot_df.melt(
+        id_vars=label_col,
+        value_vars=["count_before", "count_after", "count_removed"],
+        var_name="stage",
+        value_name="count",
+    )
 
-    sample = view_df.sample(n=min(n, len(view_df)), random_state=seed)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    sns.barplot(data=melted, x=label_col, y="count", hue="stage", ax=ax)
+    ax.set_title("Class Counts Before and After Cleaning", fontweight="bold")
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Count")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    cols = min(4, len(sample))
-    rows = int(np.ceil(len(sample) / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.3, rows * 3.4))
-    axes = np.asarray(axes).reshape(-1)
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
-    for ax, (_, row) in zip(axes, sample.iterrows()):
-        try:
-            img = Image.open(row[path_col]).convert("RGB")
-            ax.imshow(img)
-        except Exception:
-            ax.text(0.5, 0.5, "Unreadable", ha="center", va="center")
 
-        ax.axis("off")
+def plot_threshold_sweep_results(
+    sweep_df: pd.DataFrame,
+    metric_col: str = "f1_macro",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot Sweet Spot threshold sweep results."""
+    if sweep_df.empty:
+        raise ValueError("sweep_df is empty.")
+    _ensure_columns(sweep_df, ["train_retention_pct", metric_col])
 
-        title_parts = []
-        if label_col in row:
-            title_parts.append(str(row[label_col]))
-        if reason_col in row:
-            title_parts.append(str(row[reason_col]))
-        ax.set_title("\n".join(title_parts), fontsize=8)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.scatterplot(
+        data=sweep_df,
+        x="train_retention_pct",
+        y=metric_col,
+        hue="filter" if "filter" in sweep_df.columns else None,
+        s=80,
+        ax=ax,
+    )
+    ax.set_title("Threshold Sweep Results", fontweight="bold")
+    ax.set_xlabel("Training Retention (%)")
+    ax.set_ylabel(metric_col)
+    ax.grid(axis="both", linestyle="--", alpha=0.3)
 
-    for ax in axes[len(sample):]:
-        ax.axis("off")
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
-    plt.suptitle("Removed Image Examples", fontsize=14, fontweight="bold")
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+# -----------------------------------------------------------------------------
+# Split / transform / evaluation plots
+# -----------------------------------------------------------------------------
 
 
 def plot_split_distribution(
-    train_df,
-    val_df,
-    test_df,
-    label_col="label_name",
-    save_path=None,
-):
-    """Plot class distribution for train/validation/test splits."""
+    splits: Mapping[str, pd.DataFrame] | None = None,
+    train_df: pd.DataFrame | None = None,
+    val_df: pd.DataFrame | None = None,
+    test_df: pd.DataFrame | None = None,
+    label_col: str = "label_name",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot class distribution across dataframe splits."""
+    if splits is None:
+        splits = {"train": train_df, "val": val_df, "test": test_df}
 
     records: list[dict[str, Any]] = []
 
-    for split_name, split_df in [("Train", train_df), ("Validation", val_df), ("Test", test_df)]:
-        counts = split_df[label_col].value_counts()
+    for split_name, split_df in splits.items():
+        if split_df is None or split_df.empty:
+            continue
+        _ensure_columns(split_df, [label_col])
+        counts = split_df[label_col].value_counts(dropna=False)
         for class_name, count in counts.items():
             records.append({"split": split_name, "class": class_name, "count": int(count)})
 
     if not records:
-        return
+        raise ValueError("No split distribution records to plot.")
 
     plot_df = pd.DataFrame(records)
 
-    plt.figure(figsize=(8, 5))
-    sns.barplot(data=plot_df, x="split", y="count", hue="class")
-    plt.title("Class Distribution Across Splits", fontweight="bold")
-    plt.xlabel("Split")
-    plt.ylabel("Count")
-    plt.grid(axis="y", linestyle="--", alpha=0.35)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.barplot(data=plot_df, x="split", y="count", hue="class", ax=ax)
+    ax.set_title("Class Distribution Across Splits", fontweight="bold")
+    ax.set_xlabel("Split")
+    ax.set_ylabel("Count")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
-def plot_transform_examples(transform_records, n_images=None, save_path=None):
+def plot_transform_examples(
+    transform_records: Sequence[Mapping[str, Any]],
+    n_images: int | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, np.ndarray]:
     """Plot prepared transform preview records containing path/mode/image."""
-
     if not transform_records:
-        return
+        raise ValueError("transform_records must not be empty.")
 
     df = pd.DataFrame(transform_records)
-    if df.empty or not {"path", "mode", "image"}.issubset(df.columns):
-        return
+    _ensure_columns(df, ["path", "mode", "image"])
 
     paths = df["path"].drop_duplicates().tolist()
     if n_images is not None:
@@ -435,167 +622,135 @@ def plot_transform_examples(transform_records, n_images=None, save_path=None):
     modes = df["mode"].drop_duplicates().tolist()
 
     if not paths or not modes:
-        return
+        raise ValueError("No transform records available to plot.")
 
     fig, axes = plt.subplots(len(paths), len(modes), figsize=(len(modes) * 3.0, len(paths) * 3.0))
+    axes_2d = np.asarray(axes, dtype=object)
 
     if len(paths) == 1 and len(modes) == 1:
-        axes = np.array([[axes]])
+        axes_2d = axes_2d.reshape(1, 1)
     elif len(paths) == 1:
-        axes = np.array([axes])
+        axes_2d = axes_2d.reshape(1, -1)
     elif len(modes) == 1:
-        axes = np.array([[ax] for ax in axes])
+        axes_2d = axes_2d.reshape(-1, 1)
 
-    for i, path in enumerate(paths):
-        for j, mode in enumerate(modes):
-            ax = axes[i, j]
+    for row_idx, path in enumerate(paths):
+        for col_idx, mode in enumerate(modes):
+            ax = axes_2d[row_idx, col_idx]
             sub = df[(df["path"] == path) & (df["mode"] == mode)]
+
             if sub.empty:
                 ax.axis("off")
                 continue
 
-            image = sub.iloc[0]["image"]
-            ax.imshow(image)
+            ax.imshow(sub.iloc[0]["image"])
             ax.axis("off")
-            if i == 0:
+
+            if row_idx == 0:
                 ax.set_title(str(mode), fontweight="bold")
 
-    plt.suptitle("Transform Examples", fontsize=14, fontweight="bold")
-
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    fig.suptitle("Transform Examples", fontsize=14, fontweight="bold")
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, axes_2d
 
 
 def plot_confusion_matrix(
-    cm,
-    labels=("Cat", "Dog"),
-    title="Confusion Matrix",
-    save_path=None,
-):
-    """Plot confusion matrix heatmap from a numeric matrix."""
+    cm: pd.DataFrame | np.ndarray,
+    labels: Sequence[str] | None = None,
+    title: str = "Confusion Matrix",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot a confusion matrix heatmap from a dataframe or numeric matrix."""
+    if isinstance(cm, pd.DataFrame):
+        matrix = cm.to_numpy()
+        xticklabels = cm.columns.tolist()
+        yticklabels = cm.index.tolist()
+    else:
+        matrix = np.asarray(cm)
+        xticklabels = list(labels) if labels is not None else "auto"
+        yticklabels = list(labels) if labels is not None else "auto"
 
-    matrix = np.asarray(cm)
-
-    plt.figure(figsize=(5.5, 4.5))
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
     sns.heatmap(
         matrix,
         annot=True,
         fmt="d",
         cmap="Blues",
-        xticklabels=list(labels),
-        yticklabels=list(labels),
+        xticklabels=xticklabels,
+        yticklabels=yticklabels,
+        ax=ax,
     )
-    plt.title(title, fontweight="bold")
-    plt.xlabel("Predicted")
-    plt.ylabel("Actual")
+    ax.set_title(title, fontweight="bold")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
 
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
 
-def plot_wrong_predictions(
-    wrong_df,
-    n=8,
-    path_col="path",
-    true_col="true_label_name",
-    pred_col="pred_label_name",
-    save_path=None,
-):
-    """Plot misclassified examples with true and predicted labels."""
+def plot_training_curves(
+    history_df: pd.DataFrame,
+    save_path: str | Path | None = None,
+    epoch_col: str | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Plot train/validation accuracy and loss curves from a history dataframe."""
+    if history_df.empty:
+        raise ValueError("history_df is empty.")
 
-    if wrong_df.empty:
-        return
+    x = (
+        history_df[epoch_col]
+        if epoch_col is not None and epoch_col in history_df.columns
+        else np.arange(1, len(history_df) + 1)
+    )
 
-    sample = wrong_df.head(n)
-    cols = min(4, len(sample))
-    rows = int(np.ceil(len(sample) / cols))
+    available_pairs = [
+        ("accuracy", "train_accuracy", "val_accuracy"),
+        ("loss", "train_loss", "val_loss"),
+        ("f1_macro", "train_f1_macro", "val_f1_macro"),
+    ]
+    pairs = [pair for pair in available_pairs if {pair[1], pair[2]}.issubset(history_df.columns)]
 
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.3, rows * 3.4))
-    axes = np.asarray(axes).reshape(-1)
+    if not pairs:
+        raise ValueError("history_df does not contain supported train/val metric pairs.")
 
-    for ax, (_, row) in zip(axes, sample.iterrows()):
-        try:
-            img = Image.open(row[path_col]).convert("RGB")
-            ax.imshow(img)
-        except Exception:
-            ax.text(0.5, 0.5, "Unreadable", ha="center", va="center")
+    fig, axes = plt.subplots(len(pairs), 1, figsize=(8, 4.2 * len(pairs)))
+    axes_flat = _resolve_axes_array(axes)
 
-        ax.axis("off")
-        true_label = row.get(true_col, row.get("true_label", "?"))
-        pred_label = row.get(pred_col, row.get("pred_label", "?"))
-        ax.set_title(f"True: {true_label}\nPred: {pred_label}", fontsize=9)
+    for ax, (metric_name, train_col, val_col) in zip(axes_flat, pairs):
+        ax.plot(x, history_df[train_col], marker="o", label=f"Train {metric_name}")
+        ax.plot(x, history_df[val_col], marker="o", label=f"Validation {metric_name}")
+        ax.set_title(f"Training and Validation {metric_name}", fontweight="bold")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(metric_name)
+        ax.legend()
+        ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    for ax in axes[len(sample):]:
-        ax.axis("off")
-
-    plt.suptitle("Misclassified Samples", fontsize=14, fontweight="bold")
-
-    if save_path is not None:
-        savefig(save_path)
-
-    plt.show()
-
-
-def plot_training_curves(history_df, save_path_prefix=None, epoch_col=None):
-    """Plot train/validation accuracy and loss curves from history dataframe."""
-
-    x = history_df[epoch_col] if epoch_col is not None and epoch_col in history_df.columns else np.arange(1, len(history_df) + 1)
-
-    if {"train_accuracy", "val_accuracy"}.issubset(history_df.columns):
-        plt.figure(figsize=(8, 5))
-        plt.plot(x, history_df["train_accuracy"], marker="o", label="Train Accuracy")
-        plt.plot(x, history_df["val_accuracy"], marker="o", label="Validation Accuracy")
-        plt.title("Training and Validation Accuracy", fontweight="bold")
-        plt.xlabel("Epoch")
-        plt.ylabel("Accuracy")
-        plt.legend()
-        plt.grid(axis="y", linestyle="--", alpha=0.35)
-        if save_path_prefix is not None:
-            savefig(f"{save_path_prefix}_accuracy.png")
-        plt.show()
-
-    if {"train_loss", "val_loss"}.issubset(history_df.columns):
-        plt.figure(figsize=(8, 5))
-        plt.plot(x, history_df["train_loss"], marker="o", label="Train Loss")
-        plt.plot(x, history_df["val_loss"], marker="o", label="Validation Loss")
-        plt.title("Training and Validation Loss", fontweight="bold")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.legend()
-        plt.grid(axis="y", linestyle="--", alpha=0.35)
-        if save_path_prefix is not None:
-            savefig(f"{save_path_prefix}_loss.png")
-        plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, axes_flat
 
 
 def plot_model_comparison(
-    comparison_df,
-    metric="f1_macro",
-    model_col="model",
-    title=None,
-    save_path=None,
-):
-    """Plot model comparison dataframe; skip when a single model is present."""
-
-    if len(comparison_df) <= 1:
-        return
-
-    if metric not in comparison_df.columns:
-        raise KeyError(f"Metric column not found: {metric}")
-    if model_col not in comparison_df.columns:
-        raise KeyError(f"Model column not found: {model_col}")
+    comparison_df: pd.DataFrame,
+    metric: str = "f1_macro",
+    model_col: str = "model",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot model comparison dataframe."""
+    _ensure_columns(comparison_df, [metric, model_col])
+    if comparison_df.empty:
+        raise ValueError("comparison_df is empty.")
 
     view_df = comparison_df.sort_values(metric, ascending=False)
 
-    plt.figure(figsize=(8, 4.5))
-    bars = plt.bar(view_df[model_col].astype(str), view_df[metric])
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    bars = ax.bar(view_df[model_col].astype(str), view_df[metric])
 
     for bar, value in zip(bars, view_df[metric]):
-        plt.text(
+        ax.text(
             bar.get_x() + bar.get_width() / 2,
             float(value),
             f"{float(value):.4f}",
@@ -604,13 +759,62 @@ def plot_model_comparison(
             fontsize=9,
         )
 
-    plt.title(title or f"Model Comparison by {metric}", fontweight="bold")
-    plt.xlabel("Model")
-    plt.ylabel(metric)
-    plt.xticks(rotation=20, ha="right")
-    plt.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.set_title(title or f"Model Comparison by {metric}", fontweight="bold")
+    ax.set_xlabel("Model")
+    ax.set_ylabel(metric)
+    ax.tick_params(axis="x", rotation=20)
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
 
-    if save_path is not None:
-        savefig(save_path)
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
 
-    plt.show()
+
+def plot_grid_search_results(
+    results_df: pd.DataFrame,
+    x: str = "feature_extraction.backbone",
+    y: str = "f1_macro",
+    hue: str = "classifier.name",
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Plot grid-search comparison results."""
+    if results_df.empty:
+        raise ValueError("results_df is empty.")
+    _ensure_columns(results_df, [x, y])
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.barplot(
+        data=results_df,
+        x=x,
+        y=y,
+        hue=hue if hue in results_df.columns else None,
+        ax=ax,
+    )
+    ax.set_title("Grid Search Results", fontweight="bold")
+    ax.set_xlabel(x)
+    ax.set_ylabel(y)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    _finalize_figure(fig, save_path=save_path, show=show)
+    return fig, ax
+
+
+__all__ = [
+    "savefig",
+    "plot_image_grid_from_df",
+    "plot_sample_grid",
+    "plot_class_distribution_pie",
+    "plot_class_distribution_bar",
+    "plot_image_size_distribution",
+    "plot_rgb_channel_kde",
+    "plot_metric_distribution",
+    "plot_metric_correlation_heatmap",
+    "plot_before_after_cleaning",
+    "plot_threshold_sweep_results",
+    "plot_split_distribution",
+    "plot_transform_examples",
+    "plot_confusion_matrix",
+    "plot_training_curves",
+    "plot_model_comparison",
+    "plot_grid_search_results",
+]
