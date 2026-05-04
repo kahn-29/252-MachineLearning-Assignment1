@@ -212,7 +212,7 @@ def get_default_config() -> dict[str, Any]:
             "max_compression_artifact": None,
         },
         "preprocessing": {
-            "mode": "letterbox",
+            "mode": "augmented",
             "image_size": 224,
             "train_augmentation": False,
             "normalize": "imagenet",
@@ -221,17 +221,30 @@ def get_default_config() -> dict[str, Any]:
             "backbone": "efficientnet_b0",
             "pretrained": True,
             "batch_size": 128,
-            "num_workers": 0,
+            "num_workers": 2,
             "data_parallel": False,
             "force_recompute": False,
             "file_format": "npy",
+            "on_error": "raise",
         },
         "classifier": {
-            "name": "logistic_regression",
+            "name": "voting_soft",
             "params": {
-                "C": 1.0,
-                "max_iter": 2000,
-                "class_weight": None,
+                "voting": "soft",
+                "n_jobs": -1,
+                "lr": {
+                    "C": 0.1,
+                    "max_iter": 3000,
+                    "n_jobs": -1,
+                },
+                "svm": {
+                    "C": 0.1,
+                    "probability": True,
+                },
+                "rf": {
+                    "n_estimators": 100,
+                    "n_jobs": -1,
+                },
             },
         },
         "grid_search": {
