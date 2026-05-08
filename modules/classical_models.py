@@ -11,31 +11,81 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-
-
-_SUPPORTED_CLASSIFIERS = (
-    "logistic_regression",
-    "svm_linear",
-    "random_forest",
-    "voting_soft",
-    "stacking",
-)
+from config_utils import SUPPORTED_CLASSIFIERS
 
 
 def list_supported_classifiers() -> list[str]:
     """Return supported classical classifier names."""
-    return list(_SUPPORTED_CLASSIFIERS)
+    return list(SUPPORTED_CLASSIFIERS)
 
 
 def _normalize_classifier_name(name: str) -> str:
     """Normalize and validate classifier name."""
     normalized = name.lower().strip()
-    if normalized not in _SUPPORTED_CLASSIFIERS:
+    if normalized not in SUPPORTED_CLASSIFIERS:
         raise ValueError(
             f"Unsupported classifier: {name}. "
             f"Supported classifiers: {list_supported_classifiers()}"
         )
     return normalized
+
+
+def get_param_grid(classifer_name: str, grid_size: str = "small") -> dict[str, Any]:
+    """Return a default parameter grid for the requested classifier."""
+    classifier_name = _normalize_classifier_name(classifer_name)
+    normalized_grid_size = grid_size.lower().strip()
+
+    if normalized_grid_size not in {"small", "large"}:
+        raise ValueError("grid_size must be either 'small' or 'large'.")
+
+    if classifier_name == "logistic_regression":
+        if normalized_grid_size == "large":
+            return {"C": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0], "max_iter": [3000]}
+        return {"C": [0.1, 1.0, 10.0], "max_iter": [3000]}
+
+    if classifier_name == "svm_linear":
+        if normalized_grid_size == "large":
+            return {"C": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0]}
+        return {"C": [0.1, 1.0, 10.0]}
+
+    if classifier_name == "random_forest":
+        if normalized_grid_size == "large":
+            return {
+                "n_estimators": [100, 200, 300],
+                "max_depth": [None, 10, 20, 30],
+                "min_samples_split": [2, 5],
+                "min_samples_leaf": [1, 2],
+            }
+        return {
+            "n_estimators": [100, 200],
+            "max_depth": [None, 10, 20],
+            "min_samples_split": [2, 5],
+        }
+
+    if classifier_name == "voting_soft":
+        if normalized_grid_size == "large":
+            return {
+                "lr__clf__C": [0.03, 0.1, 0.3, 1.0],
+                "svm__clf__C": [0.03, 0.1, 0.3, 1.0],
+                "rf__n_estimators": [100, 200],
+                "rf__max_depth": [None, 10, 20],
+                "weights": [(1, 1, 1), (2, 1, 1), (1, 2, 1), (1, 1, 2)],
+            }
+        return {
+            "lr__clf__C": [0.1, 1.0],
+            "svm__clf__C": [0.1, 1.0],
+            "rf__n_estimators": [100],
+            "rf__max_depth": [None, 10],
+            "weights": [(1, 1, 1), (2, 1, 1), (1, 2, 1)],
+        }
+
+    if classifier_name == "stacking":
+        return {
+            "final_estimator__C": [0.1, 1.0, 10.0],
+            "rf__max_depth": [None, 10],
+        }
+
+    raise ValueError(f"No default grid defined for classifier: {classifer_name}")
 
 def _build_logistic_regression(seed: int, **params: Any) -> Pipeline:
     return Pipeline([
@@ -232,6 +282,60 @@ def _normalize_param_grid_for_estimator(
     return param_grid
 
 
+def _normalize_scoring(scoring: str | list[str] | tuple[str, ...]) -> tuple[str | dict[str, str], str]:
+    """Normalize scoring input for GridSearchCV."""
+    if isinstance(scoring, str):
+        scoring_name = scoring.strip()
+        if not scoring_name:
+            raise ValueError("scoring must not be empty.")
+        return scoring_name, scoring_name
+
+    scoring_names = [str(metric).strip() for metric in scoring if str(metric).strip()]
+    if not scoring_names:
+        raise ValueError("scoring must contain at least one metric.")
+
+    scoring_map = {metric: metric for metric in scoring_names}
+    return scoring_map, scoring_names[0]
+
+
+def tune_with_params(
+    X_train,
+    y_train,
+    classifier_name: str,
+    param_grid: dict[str, Any] | None = None,
+    grid_size: str = "small",
+    cv: int = 3,
+    seed: int = 42,
+    scoring: str | list[str] | tuple[str, ...] = "f1_macro",
+    n_jobs: int = -1,
+    verbose: int = 1,
+    return_train_score: bool = True,
+) -> GridSearchCV:
+    """Perform grid search tuning with optional default grid lookup."""
+    if param_grid is None:
+        param_grid = get_param_grid(classifier_name, grid_size)
+
+    if not param_grid:
+        raise ValueError("param_grid must not be empty.")
+
+    estimator = get_classifier(classifier_name, seed=seed)
+    normalized_grid = _normalize_param_grid_for_estimator(classifier_name, param_grid)
+    normalized_scoring, refit_metric = _normalize_scoring(scoring)
+
+    search = GridSearchCV(
+        estimator=estimator,
+        param_grid=normalized_grid,
+        cv=cv,
+        scoring=normalized_scoring,
+        refit=refit_metric,
+        n_jobs=n_jobs,
+        verbose=verbose,
+        return_train_score=return_train_score,
+    )
+    search.fit(X_train, y_train)
+    return search
+
+
 def tune_classifier_grid(
     X_train,
     y_train,
@@ -243,18 +347,15 @@ def tune_classifier_grid(
     n_jobs: int = -1,
 ) -> GridSearchCV:
     """Perform grid search hyperparameter tuning on a classifier."""
-    if not param_grid:
-        raise ValueError("param_grid must not be empty.")
-
-    estimator = get_classifier(classifier_name, seed=seed)
-    normalized_grid = _normalize_param_grid_for_estimator(classifier_name, param_grid)
-
-    search = GridSearchCV(
-        estimator=estimator,
-        param_grid=normalized_grid,
+    return tune_with_params(
+        X_train=X_train,
+        y_train=y_train,
+        classifier_name=classifier_name,
+        param_grid=param_grid,
         cv=cv,
+        seed=seed,
         scoring=scoring,
         n_jobs=n_jobs,
+        verbose=0,
+        return_train_score=False,
     )
-    search.fit(X_train, y_train)
-    return search
