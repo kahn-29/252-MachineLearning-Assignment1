@@ -237,20 +237,20 @@ def get_default_config() -> dict[str, Any]:
         "classifier": {
             "name": "voting_soft",
             "params": {
-                "voting": "soft",
-                "n_jobs": -1,
+                "voting": ["soft"],
+                "n_jobs": [-1],
                 "lr": {
-                    "C": 0.1,
-                    "max_iter": 3000,
-                    "n_jobs": -1,
+                    "C": [0.1],
+                    "max_iter": [3000],
+                    "n_jobs": [-1],
                 },
                 "svm": {
-                    "C": 0.1,
-                    "probability": True,
+                    "C": [0.1],
+                    "probability": [True],
                 },
                 "rf": {
-                    "n_estimators": 100,
-                    "n_jobs": -1,
+                    "n_estimators": [100],
+                    "n_jobs": [-1],
                 },
             },
         },
