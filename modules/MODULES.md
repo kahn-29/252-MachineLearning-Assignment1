@@ -93,11 +93,46 @@ Private helpers:
 | `_validate_preprocessing_config(preprocessing)` | Preprocessing config | `None` or raises | Validates mode and image size. |
 | `_validate_feature_extraction_config(feature_extraction)` | Feature config | `None` or raises | Validates backbone, batch size, workers, file format. |
 | `_validate_classifier_config(classifier)` | Classifier config | `None` or raises | Validates classifier name. |
+| `_validate_tune_hyperparameter_config(tune)` | Tune-hyperparameter config | `None` or raises | Validates grid_size, cv, scoring, n_jobs, and enabled flag for hyperparameter tuning. |
 | `_validate_runtime_config(runtime)` | Runtime config | `None` or raises | Validates runtime worker settings. |
 | `_validate_cleaning_config(cleaning)` | Cleaning config | `None` or raises | Validates cleaning thresholds. |
 | `_validate_deep_learning_config(deep_learning)` | DL config | `None` or raises | Validates DL backbone, image size, epochs, LR, dropout. |
 | `_validate_image_size(value, field_name)` | Size value and field name | `None` or raises | Validates integer or 2-tuple image size. |
 | `_json_safe(value)` | Any value | JSON-safe value | Converts Path/NumPy/non-finite values for JSON. |
+
+## Hyperparameter Tuning Configuration
+
+The `tune-hyperparameter` section controls grid search behavior independently from classifier selection:
+
+```json
+{
+  "tune-hyperparameter": {
+    "enabled": true,                          // Enable/disable tuning; if false, validates but skips tuning
+    "grid_size": "small",                     // "small" or "large" - controls parameter grid expansion
+    "cv": 3,                                  // Cross-validation folds (≥2)
+    "scoring": ["f1_macro", "accuracy"],      // Single metric string or ordered list of metrics
+    "n_jobs": -1                              // Parallel jobs (-1 = all cores, ≥1 = specific count)
+  },
+  "classifier": {
+    "name": "voting_soft",
+    "params": {
+      // Optional: explicit parameter overrides per classifier
+      // If provided, skips default grid generation via get_param_grid()
+    }
+  }
+}
+```
+
+**Configuration Flow:**
+1. Tuning is enabled by default (`enabled: true`).
+2. When enabled, `grid_size` determines parameter search space breadth.
+3. `cv` controls cross-validation folds during grid search.
+4. `scoring`: Single metric string or ordered list. First metric = refit metric; others = secondary tracked metrics.
+5. `n_jobs`: Parallelization (-1 = all cores).
+
+**Classifier Params Hierarchy:**
+- If `classifier.params` is provided → use exact values; tuning skips grid search but respects `cv` and `scoring`.
+- If `classifier.params` is omitted → generate grid via `get_param_grid(classifier.name, tune-hyperparameter.grid_size)`.
 
 ---
 
@@ -343,9 +378,11 @@ Classical ML classifier construction, training, benchmarking, and tuning.
 | `_SUPPORTED_CLASSIFIERS` | None | `tuple[str, ...]` | Supported classifier names. |
 | `list_supported_classifiers()` | None | `list[str]` | Returns supported classifiers. |
 | `get_classifier(name, seed=42, **params)` | Classifier name and parameters | `BaseEstimator` | Builds configured sklearn classifier. |
+| `get_param_grid(classifer_name, grid_size="small")` | Classifier name and grid size | `dict[str, Any]` | Returns a default hyperparameter grid for the requested classifier. |
 | `train_classifier(X_train, y_train, classifier_name, seed=42, **params)` | Feature matrix, labels, classifier config | `BaseEstimator` | Fits a classical classifier. |
 | `benchmark_classifiers(X_train, y_train, X_val, y_val, classifier_configs, seed=42)` | Train/val features and model configs | `tuple[pd.DataFrame, dict[str, BaseEstimator]]` | Trains multiple classifiers and returns metrics/model dict. |
 | `select_best_model(results_df, trained_models, metric="f1_macro", model_key_col="run_name")` | Results table and model dict | `tuple[str, BaseEstimator, pd.Series]` | Selects best trained model. |
+| `tune_with_params(X_train, y_train, classifier_name, param_grid=None, grid_size="small", cv=3, seed=42, scoring="f1_macro", n_jobs=-1, verbose=1, return_train_score=True)` | Training data and tuning parameters | `GridSearchCV` | Runs grid search with optional default-grid lookup and ordered multi-metric scoring. |
 | `tune_classifier_grid(X_train, y_train, classifier_name, param_grid, cv=3, seed=42, scoring="f1_macro", n_jobs=-1)` | Training data and hyperparameter grid | `GridSearchCV` | Runs sklearn grid search for one classifier. |
 
 Private helpers:

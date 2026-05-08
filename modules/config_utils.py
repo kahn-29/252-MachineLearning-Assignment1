@@ -212,7 +212,7 @@ def get_default_config() -> dict[str, Any]:
             "max_compression_artifact": None,
         },
         "preprocessing": {
-            "mode": "letterbox",
+            "mode": "augmented",
             "image_size": 224,
             "train_augmentation": False,
             "normalize": "imagenet",
@@ -221,26 +221,37 @@ def get_default_config() -> dict[str, Any]:
             "backbone": "efficientnet_b0",
             "pretrained": True,
             "batch_size": 128,
-            "num_workers": 0,
+            "num_workers": 2,
             "data_parallel": False,
             "force_recompute": False,
             "file_format": "npy",
+            "on_error": "raise",
+        },
+        "tune-hyperparameter": {
+            "enabled": True,
+            "grid_size": "small", # or "large"
+            "cv": 3,
+            "scoring": ["f1_macro", "accuracy"],
+            "n_jobs": -1
         },
         "classifier": {
-            "name": "logistic_regression",
+            "name": "voting_soft",
             "params": {
-                "C": 1.0,
-                "max_iter": 2000,
-                "class_weight": None,
-            },
-        },
-        "grid_search": {
-            "primary_metric": "f1_macro",
-            "tie_breakers": ["accuracy"],
-            "search_space": {
-                "preprocessing.mode": ["stretch", "letterbox", "center_crop"],
-                "feature_extraction.backbone": ["efficientnet_b0", "resnet18"],
-                "classifier.name": ["logistic_regression", "svm_linear", "random_forest"],
+                "voting": ["soft"],
+                "n_jobs": [-1],
+                "lr": {
+                    "C": [0.1],
+                    "max_iter": [3000],
+                    "n_jobs": [-1],
+                },
+                "svm": {
+                    "C": [0.1],
+                    "probability": [True],
+                },
+                "rf": {
+                    "n_estimators": [100],
+                    "n_jobs": [-1],
+                },
             },
         },
         "deep_learning": {
@@ -272,6 +283,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "preprocessing",
         "feature_extraction",
         "classifier",
+        "tune-hyperparameter",
     )
     missing = [section for section in required_sections if section not in config]
     if missing:
@@ -281,6 +293,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     _validate_preprocessing_config(config["preprocessing"])
     _validate_feature_extraction_config(config["feature_extraction"])
     _validate_classifier_config(config["classifier"])
+    _validate_tune_hyperparameter_config(config["tune-hyperparameter"])
     _validate_runtime_config(config.get("runtime", {}))
     _validate_cleaning_config(config.get("cleaning", {}))
 
@@ -341,6 +354,39 @@ def _validate_classifier_config(classifier: Mapping[str, Any]) -> None:
             f"Unsupported classifier.name: {name}. "
             f"Supported classifiers: {list(SUPPORTED_CLASSIFIERS)}"
         )
+
+
+def _validate_tune_hyperparameter_config(tune: Mapping[str, Any]) -> None:
+    """Validate hyperparameter tuning configuration."""
+    enabled = bool(tune.get("enabled", True))
+    if not enabled:
+        return
+
+    grid_size = str(tune.get("grid_size", "small")).lower().strip()
+    if grid_size not in {"small", "large"}:
+        raise ValueError(f"tune-hyperparameter.grid_size must be 'small' or 'large', got '{grid_size}'")
+
+    cv = int(tune.get("cv", 3))
+    if cv < 2:
+        raise ValueError(f"tune-hyperparameter.cv must be at least 2, got {cv}")
+
+    n_jobs = int(tune.get("n_jobs", -1))
+    if n_jobs < -1 or n_jobs == 0:
+        raise ValueError(f"tune-hyperparameter.n_jobs must be -1 (all) or positive, got {n_jobs}")
+
+    scoring = tune.get("scoring", "f1_macro")
+    if isinstance(scoring, str):
+        scoring_str = str(scoring).strip()
+        if not scoring_str:
+            raise ValueError("tune-hyperparameter.scoring must not be empty")
+    elif isinstance(scoring, (list, tuple)):
+        if not scoring:
+            raise ValueError("tune-hyperparameter.scoring list/tuple must not be empty")
+        for metric in scoring:
+            if not isinstance(metric, str) or not str(metric).strip():
+                raise ValueError(f"tune-hyperparameter.scoring contains invalid metric: {metric}")
+    else:
+        raise ValueError(f"tune-hyperparameter.scoring must be a string or list of strings, got {type(scoring).__name__}")
 
 
 def _validate_runtime_config(runtime: Mapping[str, Any]) -> None:
