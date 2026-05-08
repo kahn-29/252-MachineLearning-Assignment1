@@ -11,7 +11,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from config_utils import SUPPORTED_CLASSIFIERS
+from modules.config_utils import SUPPORTED_CLASSIFIERS
 
 
 def list_supported_classifiers() -> list[str]:
