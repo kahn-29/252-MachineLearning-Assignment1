@@ -4,26 +4,11 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-
-_SUPPORTED_BACKBONES = ("resnet18", "vgg16", "efficientnet_b0")
-
-
-def list_supported_backbones() -> list[str]:
-    """Return the backbone names supported by this project."""
-    return list(_SUPPORTED_BACKBONES)
-
-
-def _normalize_backbone_name(name: str) -> str:
-    normalized = name.lower().strip()
-    if normalized not in _SUPPORTED_BACKBONES:
-        raise ValueError(
-            f"Unsupported backbone: {name}. Supported backbones: {list_supported_backbones()}"
-        )
-    return normalized
+from modules.config_utils import SUPPORTED_BACKBONES, validate_and_normalize
 
 
 def _load_base_model(name: str, pretrained: bool = True) -> nn.Module:
-    name = _normalize_backbone_name(name)
+    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
 
     if name == "resnet18":
         weights = models.ResNet18_Weights.DEFAULT if pretrained else None
@@ -41,7 +26,7 @@ def _load_base_model(name: str, pretrained: bool = True) -> nn.Module:
 
 
 def _strip_classifier(model: nn.Module, name: str) -> nn.Module:
-    name = _normalize_backbone_name(name)
+    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
 
     if name == "resnet18":
         return nn.Sequential(*list(model.children())[:-1])
@@ -58,7 +43,7 @@ def get_backbone(
     data_parallel: bool = False,
 ) -> nn.Module:
     """Load a pretrained backbone and strip its classification head."""
-    name = _normalize_backbone_name(name)
+    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,7 +66,7 @@ def get_backbone(
 def get_feature_dim(backbone_name: str) -> int:
     """Return the embedding dimension for a supported backbone."""
     dims = {"resnet18": 512, "vgg16": 512, "efficientnet_b0": 1280}
-    key = _normalize_backbone_name(backbone_name)
+    key = validate_and_normalize(backbone_name, SUPPORTED_BACKBONES, "backbone")
     return dims[key]
 
 
@@ -106,7 +91,7 @@ def replace_classifier_head(
     dropout: float = 0.2,
 ) -> nn.Module:
     """Replace the classification head on a full torchvision model."""
-    name = _normalize_backbone_name(backbone_name)
+    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
 
     if num_classes < 2:
         raise ValueError("num_classes must be >= 2.")
@@ -149,7 +134,7 @@ def build_transfer_model(
     device: str | torch.device | None = None,
 ) -> nn.Module:
     """Build a transfer-learning model with a new classification head."""
-    name = _normalize_backbone_name(backbone_name)
+    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
     model = _load_base_model(name, pretrained=pretrained)
 
     if freeze_backbone:
@@ -169,7 +154,6 @@ def build_transfer_model(
 
 
 __all__ = [
-  "list_supported_backbones",
   "get_backbone",
   "get_feature_dim",
   "freeze_model",

@@ -24,14 +24,7 @@ def _ensure_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
     missing = [column for column in columns if column not in df.columns]
     if missing:
         raise KeyError(f"Missing required dataframe column(s): {missing}")
-
-
-def _as_numeric_series(df: pd.DataFrame, column: str) -> pd.Series:
-    """Return a dataframe column as numeric series."""
-    if column not in df.columns:
-        raise KeyError(f"Column not found in dataframe: {column}")
-    return pd.to_numeric(df[column], errors="coerce")
-
+    
 
 def _read_rgb_image(path: str | Path) -> Image.Image | None:
     """Read a path as an RGB PIL image, returning None when unreadable."""
@@ -70,19 +63,6 @@ def _finalize_figure(
         plt.show()
 
     return fig
-
-
-def savefig(path: str | Path, dpi: int = 160, bbox_inches: str = "tight") -> Path:
-    """Save the current matplotlib figure and return its path.
-
-    This helper is kept for notebook compatibility. New plotting functions should
-    prefer their own ``save_path`` parameter.
-    """
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(output, dpi=dpi, bbox_inches=bbox_inches)
-    return output
 
 
 # -----------------------------------------------------------------------------
@@ -605,56 +585,6 @@ def plot_split_distribution(
     return fig, ax
 
 
-def plot_transform_examples(
-    transform_records: Sequence[Mapping[str, Any]],
-    n_images: int | None = None,
-    save_path: str | Path | None = None,
-    show: bool = False,
-) -> tuple[plt.Figure, np.ndarray]:
-    """Plot prepared transform preview records containing path/mode/image."""
-    if not transform_records:
-        raise ValueError("transform_records must not be empty.")
-
-    df = pd.DataFrame(transform_records)
-    _ensure_columns(df, ["path", "mode", "image"])
-
-    paths = df["path"].drop_duplicates().tolist()
-    if n_images is not None:
-        paths = paths[: int(n_images)]
-    modes = df["mode"].drop_duplicates().tolist()
-
-    if not paths or not modes:
-        raise ValueError("No transform records available to plot.")
-
-    fig, axes = plt.subplots(len(paths), len(modes), figsize=(len(modes) * 3.0, len(paths) * 3.0))
-    axes_2d = np.asarray(axes, dtype=object)
-
-    if len(paths) == 1 and len(modes) == 1:
-        axes_2d = axes_2d.reshape(1, 1)
-    elif len(paths) == 1:
-        axes_2d = axes_2d.reshape(1, -1)
-    elif len(modes) == 1:
-        axes_2d = axes_2d.reshape(-1, 1)
-
-    for row_idx, path in enumerate(paths):
-        for col_idx, mode in enumerate(modes):
-            ax = axes_2d[row_idx, col_idx]
-            sub = df[(df["path"] == path) & (df["mode"] == mode)]
-
-            if sub.empty:
-                ax.axis("off")
-                continue
-
-            ax.imshow(sub.iloc[0]["image"])
-            ax.axis("off")
-
-            if row_idx == 0:
-                ax.set_title(str(mode), fontweight="bold")
-
-    fig.suptitle("Transform Examples", fontsize=14, fontweight="bold")
-    _finalize_figure(fig, save_path=save_path, show=show)
-    return fig, axes_2d
-
 
 def plot_confusion_matrix(
     cm: pd.DataFrame | np.ndarray,
@@ -691,86 +621,6 @@ def plot_confusion_matrix(
     return fig, ax
 
 
-def plot_training_curves(
-    history_df: pd.DataFrame,
-    save_path: str | Path | None = None,
-    epoch_col: str | None = None,
-    show: bool = False,
-) -> tuple[plt.Figure, np.ndarray]:
-    """Plot train/validation accuracy and loss curves from a history dataframe."""
-    if history_df.empty:
-        raise ValueError("history_df is empty.")
-
-    x = (
-        history_df[epoch_col]
-        if epoch_col is not None and epoch_col in history_df.columns
-        else np.arange(1, len(history_df) + 1)
-    )
-
-    available_pairs = [
-        ("accuracy", "train_accuracy", "val_accuracy"),
-        ("loss", "train_loss", "val_loss"),
-        ("f1_macro", "train_f1_macro", "val_f1_macro"),
-    ]
-    pairs = [pair for pair in available_pairs if {pair[1], pair[2]}.issubset(history_df.columns)]
-
-    if not pairs:
-        raise ValueError("history_df does not contain supported train/val metric pairs.")
-
-    fig, axes = plt.subplots(len(pairs), 1, figsize=(8, 4.2 * len(pairs)))
-    axes_flat = _resolve_axes_array(axes)
-
-    for ax, (metric_name, train_col, val_col) in zip(axes_flat, pairs):
-        ax.plot(x, history_df[train_col], marker="o", label=f"Train {metric_name}")
-        ax.plot(x, history_df[val_col], marker="o", label=f"Validation {metric_name}")
-        ax.set_title(f"Training and Validation {metric_name}", fontweight="bold")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel(metric_name)
-        ax.legend()
-        ax.grid(axis="y", linestyle="--", alpha=0.35)
-
-    _finalize_figure(fig, save_path=save_path, show=show)
-    return fig, axes_flat
-
-
-def plot_model_comparison(
-    comparison_df: pd.DataFrame,
-    metric: str = "f1_macro",
-    model_col: str = "model",
-    title: str | None = None,
-    save_path: str | Path | None = None,
-    show: bool = False,
-) -> tuple[plt.Figure, plt.Axes]:
-    """Plot model comparison dataframe."""
-    _ensure_columns(comparison_df, [metric, model_col])
-    if comparison_df.empty:
-        raise ValueError("comparison_df is empty.")
-
-    view_df = comparison_df.sort_values(metric, ascending=False)
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    bars = ax.bar(view_df[model_col].astype(str), view_df[metric])
-
-    for bar, value in zip(bars, view_df[metric]):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            float(value),
-            f"{float(value):.4f}",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-    ax.set_title(title or f"Model Comparison by {metric}", fontweight="bold")
-    ax.set_xlabel("Model")
-    ax.set_ylabel(metric)
-    ax.tick_params(axis="x", rotation=20)
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
-
-    _finalize_figure(fig, save_path=save_path, show=show)
-    return fig, ax
-
-
 def plot_grid_search_results(
     results_df: pd.DataFrame,
     x: str = "feature_extraction.backbone",
@@ -802,7 +652,6 @@ def plot_grid_search_results(
 
 
 __all__ = [
-    "savefig",
     "plot_image_grid_from_df",
     "plot_sample_grid",
     "plot_pie_chart",
@@ -814,9 +663,6 @@ __all__ = [
     "plot_before_after_cleaning",
     "plot_threshold_sweep_results",
     "plot_split_distribution",
-    "plot_transform_examples",
     "plot_confusion_matrix",
-    "plot_training_curves",
-    "plot_model_comparison",
     "plot_grid_search_results",
 ]
