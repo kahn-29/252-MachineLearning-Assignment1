@@ -30,9 +30,9 @@ def _normalize_classifier_name(name: str) -> str:
     return normalized
 
 
-def get_param_grid(classifer_name: str, grid_size: str = "small") -> dict[str, Any]:
+def get_param_grid(classifier_name: str, grid_size: str = "small") -> dict[str, Any]:
     """Return a default parameter grid for the requested classifier."""
-    classifier_name = _normalize_classifier_name(classifer_name)
+    classifier_name = _normalize_classifier_name(classifier_name)
     normalized_grid_size = grid_size.lower().strip()
 
     if normalized_grid_size not in {"small", "large"}:
@@ -115,7 +115,7 @@ def _build_svm_linear(seed: int, **params: Any) -> Pipeline:
 
 def _build_random_forest(seed: int, **params: Any) -> RandomForestClassifier:
     return RandomForestClassifier(
-        n_estimators=params.get("n_estimators", 200),
+        n_estimators=params.get("n_estimators", 100),
         max_depth=params.get("max_depth"),
         min_samples_split=params.get("min_samples_split", 2),
         min_samples_leaf=params.get("min_samples_leaf", 1),
@@ -125,42 +125,61 @@ def _build_random_forest(seed: int, **params: Any) -> RandomForestClassifier:
     )
 
 
-def get_classifier(name: str, seed: int = 42, **params: Any) -> BaseEstimator:
+def get_classifier(
+    name: str,
+    seed: int = 42,
+    params: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> BaseEstimator:
     """Build a classical classifier from a name and parameter dictionary."""
     name = _normalize_classifier_name(name)
 
+    final_params = dict(params or {})
+    final_params.update(overrides)
+
     if name == "logistic_regression":
-        return _build_logistic_regression(seed=seed, **params)
+        return _build_logistic_regression(seed=seed, **final_params)
 
     if name == "svm_linear":
-        return _build_svm_linear(seed=seed, **params)
+        return _build_svm_linear(seed=seed, **final_params)
 
     if name == "random_forest":
-        return _build_random_forest(seed=seed, **params)
+        return _build_random_forest(seed=seed, **final_params)
 
     if name == "voting_soft":
-        return VotingClassifier(
-            estimators=[
-                ("lr", _build_logistic_regression(seed=seed, **params.get("lr", {}))),
-                ("svm", _build_svm_linear(seed=seed, **params.get("svm", {}))),
-                ("rf", _build_random_forest(seed=seed, **params.get("rf", {}))),
+        voting_kwargs = {
+            "estimators": [
+                ("lr", _build_logistic_regression(seed=seed, **final_params.get("lr", {}))),
+                ("svm", _build_svm_linear(seed=seed, **final_params.get("svm", {}))),
+                ("rf", _build_random_forest(seed=seed, **final_params.get("rf", {}))),
             ],
-            voting=params.get("voting", "soft"),
-            n_jobs=params.get("n_jobs", -1),
-        )
+            "voting": final_params.get("voting", "soft"),
+            "n_jobs": final_params.get("n_jobs", -1),
+        }
+
+        if "weights" in final_params:
+            voting_kwargs["weights"] = final_params["weights"]
+
+        return VotingClassifier(**voting_kwargs)
 
     if name == "stacking":
+        final_estimator_params = dict(final_params.get("final_estimator", {}))
+
         return StackingClassifier(
             estimators=[
-                ("lr", _build_logistic_regression(seed=seed, **params.get("lr", {}))),
-                ("svm", _build_svm_linear(seed=seed, **params.get("svm", {}))),
-                ("rf", _build_random_forest(seed=seed, **params.get("rf", {}))),
+                ("lr", _build_logistic_regression(seed=seed, **final_params.get("lr", {}))),
+                ("svm", _build_svm_linear(seed=seed, **final_params.get("svm", {}))),
+                ("rf", _build_random_forest(seed=seed, **final_params.get("rf", {}))),
             ],
             final_estimator=LogisticRegression(
-                max_iter=params.get("final_max_iter", 1000),
+                C=final_estimator_params.get("C", 1.0),
+                max_iter=final_estimator_params.get("max_iter", 3000),
+                class_weight=final_estimator_params.get("class_weight"),
+                solver=final_estimator_params.get("solver", "lbfgs"),
                 random_state=seed,
+                n_jobs=final_estimator_params.get("n_jobs"),
             ),
-            n_jobs=params.get("n_jobs", -1),
+            n_jobs=final_params.get("n_jobs", -1),
         )
 
     raise ValueError(f"Unsupported classifier: {name}")
@@ -170,14 +189,20 @@ def train_classifier(
     X_train,
     y_train,
     classifier_name: str,
+    params: dict[str, Any] | None = None,
     seed: int = 42,
-    **params: Any,
+    **overrides: Any,
 ) -> BaseEstimator:
     """Train a classical classifier on training data."""
     if X_train is None or y_train is None:
         raise ValueError("X_train and y_train must not be None.")
 
-    model = get_classifier(classifier_name, seed=seed, **params)
+    model = get_classifier(
+        classifier_name,
+        seed=seed,
+        params=params,
+        **overrides,
+    )
     model.fit(X_train, y_train)
     return model
 
@@ -282,20 +307,37 @@ def _normalize_param_grid_for_estimator(
     return param_grid
 
 
-def _normalize_scoring(scoring: str | list[str] | tuple[str, ...]) -> tuple[str | dict[str, str], str]:
+def _normalize_scoring(
+    scoring: str | list[str] | tuple[str, ...],
+    refit: str | None = None,
+) -> tuple[str | dict[str, str], str]:
     """Normalize scoring input for GridSearchCV."""
     if isinstance(scoring, str):
         scoring_name = scoring.strip()
         if not scoring_name:
             raise ValueError("scoring must not be empty.")
-        return scoring_name, scoring_name
+
+        refit_metric = refit or scoring_name
+        if refit_metric != scoring_name:
+            raise ValueError(
+                f"refit='{refit_metric}' must match scoring='{scoring_name}' when scoring is a string."
+            )
+
+        return scoring_name, refit_metric
 
     scoring_names = [str(metric).strip() for metric in scoring if str(metric).strip()]
     if not scoring_names:
         raise ValueError("scoring must contain at least one metric.")
 
     scoring_map = {metric: metric for metric in scoring_names}
-    return scoring_map, scoring_names[0]
+    refit_metric = refit or scoring_names[0]
+
+    if refit_metric not in scoring_map:
+        raise ValueError(
+            f"refit='{refit_metric}' must be one of scoring metrics: {scoring_names}"
+        )
+
+    return scoring_map, refit_metric
 
 
 def tune_with_params(
@@ -303,10 +345,12 @@ def tune_with_params(
     y_train,
     classifier_name: str,
     param_grid: dict[str, Any] | None = None,
+    base_params: dict[str, Any] | None = None,
     grid_size: str = "small",
     cv: int = 3,
     seed: int = 42,
     scoring: str | list[str] | tuple[str, ...] = "f1_macro",
+    refit: str | None = None,
     n_jobs: int = -1,
     verbose: int = 1,
     return_train_score: bool = True,
@@ -318,9 +362,14 @@ def tune_with_params(
     if not param_grid:
         raise ValueError("param_grid must not be empty.")
 
-    estimator = get_classifier(classifier_name, seed=seed)
+    estimator = get_classifier(
+        classifier_name,
+        seed=seed,
+        params=base_params,
+    )
+
     normalized_grid = _normalize_param_grid_for_estimator(classifier_name, param_grid)
-    normalized_scoring, refit_metric = _normalize_scoring(scoring)
+    normalized_scoring, refit_metric = _normalize_scoring(scoring, refit=refit)
 
     search = GridSearchCV(
         estimator=estimator,
@@ -332,6 +381,7 @@ def tune_with_params(
         verbose=verbose,
         return_train_score=return_train_score,
     )
+
     search.fit(X_train, y_train)
     return search
 
@@ -341,10 +391,14 @@ def tune_classifier_grid(
     y_train,
     classifier_name: str,
     param_grid: dict[str, Any],
+    base_params: dict[str, Any] | None = None,
     cv: int = 3,
     seed: int = 42,
-    scoring: str = "f1_macro",
+    scoring: str | list[str] | tuple[str, ...] = "f1_macro",
+    refit: str | None = None,
     n_jobs: int = -1,
+    verbose: int = 2,
+    return_train_score: bool = False,
 ) -> GridSearchCV:
     """Perform grid search hyperparameter tuning on a classifier."""
     return tune_with_params(
@@ -352,10 +406,12 @@ def tune_classifier_grid(
         y_train=y_train,
         classifier_name=classifier_name,
         param_grid=param_grid,
+        base_params=base_params,
         cv=cv,
         seed=seed,
         scoring=scoring,
+        refit=refit,
         n_jobs=n_jobs,
-        verbose=0,
-        return_train_score=False,
+        verbose=verbose,
+        return_train_score=return_train_score,
     )
