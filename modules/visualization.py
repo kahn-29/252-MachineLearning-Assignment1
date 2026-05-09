@@ -253,42 +253,44 @@ def plot_sample_grid(
     return fig, axes_2d
 
 
-def plot_class_distribution_pie(
+def plot_pie_chart(
     df: pd.DataFrame,
-    label_col: str = "label_name",
-    title: str = "Class Distribution",
+    category_col: str,
+    title: str | None = None,
     save_path: str | Path | None = None,
     show: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot class distribution as a pie chart with percentages."""
-    _ensure_columns(df, [label_col])
-    counts = df[label_col].value_counts(dropna=False).sort_index()
+    """Plot distribution of any categorical column as a pie chart."""
+    _ensure_columns(df, [category_col])
+    counts = df[category_col].value_counts(dropna=False).sort_index()
 
     if counts.empty:
-        raise ValueError("No class values to plot.")
+        raise ValueError(f"No values to plot for column {category_col}")
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.pie(counts.values, labels=counts.index.astype(str), autopct="%1.1f%%", startangle=90)
-    ax.set_title(title, fontweight="bold")
+    ax.set_title(title or f"Distribution of {category_col}", fontweight="bold")
     ax.axis("equal")
 
     _finalize_figure(fig, save_path=save_path, show=show)
     return fig, ax
 
 
-def plot_class_distribution_bar(
+def plot_bar_chart(
     df: pd.DataFrame,
-    label_col: str = "label_name",
-    title: str = "Class Distribution",
+    category_col = str,
+    title: str | None = None,
+    x_label: str | None = None,
+    y_label: str = "Count",
     save_path: str | Path | None = None,
     show: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot class distribution as a bar chart."""
-    _ensure_columns(df, [label_col])
-    counts = df[label_col].value_counts(dropna=False).sort_index()
+    """Plot distribution of any categorical column as a bar chart."""
+    _ensure_columns(df, [category_col])
+    counts = df[category_col].value_counts(dropna=False).sort_index()
 
     if counts.empty:
-        raise ValueError("No class values to plot.")
+        raise ValueError(f"No values to plot for column {category_col}")
 
     total = counts.sum()
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -305,44 +307,44 @@ def plot_class_distribution_bar(
             fontsize=9,
         )
 
-    ax.set_title(title, fontweight="bold")
-    ax.set_xlabel("Class")
-    ax.set_ylabel("Count")
+    ax.set_title(title or f"Count by {category_col}", fontweight="bold")
+    ax.set_xlabel(x_label or category_col)
+    ax.set_ylabel(y_label)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
 
     _finalize_figure(fig, save_path=save_path, show=show)
     return fig, ax
 
 
-def plot_image_size_distribution(
-    audit_df: pd.DataFrame,
-    width_col: str = "width",
-    height_col: str = "height",
-    label_col: str = "label_name",
-    title: str = "Raw Image Size Distribution",
+def plot_scatter_distribution(
+    df: pd.DataFrame,
+    x_col: str,       
+    y_col: str,        
+    hue_col: str | None = None,
+    title: str | None = None,
     save_path: str | Path | None = None,
     show: bool = False,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot width-height scatter distribution."""
-    _ensure_columns(audit_df, [width_col, height_col])
-    plot_df = audit_df.dropna(subset=[width_col, height_col]).copy()
+    """Plot scatter distribution for any two numeric columns."""
+    _ensure_columns(df, [x_col, y_col])
+    plot_df = df.dropna(subset=[x_col, y_col]).copy()
 
     if plot_df.empty:
-        raise ValueError("No valid image-size rows to plot.")
+        raise ValueError(f"No valid numeric rows to plot for {x_col} and {y_col}.")
 
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.scatterplot(
         data=plot_df,
-        x=width_col,
-        y=height_col,
-        hue=label_col if label_col in plot_df.columns else None,
+        x=x_col,
+        y=y_col,
+        hue=hue_col if hue_col in plot_df.columns else None,
         alpha=0.45,
         s=28,
         ax=ax,
     )
-    ax.set_title(title, fontweight="bold")
-    ax.set_xlabel("Width")
-    ax.set_ylabel("Height")
+    ax.set_title(title or f"Scatter: {x_col} vs {y_col}", fontweight="bold")
+    ax.set_xlabel(x_col.capitalize())
+    ax.set_ylabel(y_col.capitalize())
     ax.grid(axis="both", linestyle="--", alpha=0.3)
 
     _finalize_figure(fig, save_path=save_path, show=show)
@@ -803,9 +805,9 @@ __all__ = [
     "savefig",
     "plot_image_grid_from_df",
     "plot_sample_grid",
-    "plot_class_distribution_pie",
-    "plot_class_distribution_bar",
-    "plot_image_size_distribution",
+    "plot_pie_chart",
+    "plot_bar_chart",
+    "plot_scatter_distribution",
     "plot_rgb_channel_kde",
     "plot_metric_distribution",
     "plot_metric_correlation_heatmap",
