@@ -220,7 +220,6 @@ Private helpers:
 
 | Helper                                    | Input                             | Output      | Meaning                                         |
 | ----------------------------------------- | --------------------------------- | ----------- | ----------------------------------------------- |
-| `_normalize_backbone_name(name)`          | Backbone name                     | `str`       | Normalizes and validates backbone.              |
 | `_load_base_model(name, pretrained=True)` | Backbone name and pretrained flag | `nn.Module` | Loads full torchvision base model.              |
 | `_strip_classifier(model, name)`          | Full model and backbone name      | `nn.Module` | Removes classifier head for feature extraction. |
 
