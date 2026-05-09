@@ -585,16 +585,28 @@ class TuneHyperparameterConfig:
 @dataclass
 class DeepLearningConfig:
     enabled: bool = False
+
+    # Model
     backbone: str = "efficientnet_b0"
     pretrained: bool = True
     image_size: int = 224
+    dropout_head: float = 0.3
+
+    # DataLoader
     batch_size: int = 32
-    head_epochs: int = 3
-    fine_tune_epochs: int = 2
-    head_lr: float = 1e-3
-    fine_tune_lr: float = 1e-5
-    dropout: float = 0.2
-    unfreeze_last_blocks: int = 1
+    num_workers: int = 2
+
+    # Training schedule
+    epochs: int = 20
+    freeze_epochs: int = 3
+    lr: float = 1e-4
+    unfreeze_lr: float = 1e-5
+    weight_decay: float = 1e-4
+
+    # Regularization / stability
+    label_smoothing: float = 0.1
+    early_stopping_patience: int = 5
+    use_amp: bool = True
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None = None) -> "DeepLearningConfig":
@@ -604,10 +616,18 @@ class DeepLearningConfig:
         return config
 
     def validate(self) -> None:
-        if self.backbone not in SUPPORTED_BACKBONES:
+        supported_dl_backbones = {
+            "resnet18",
+            "resnet50",
+            "vgg16",
+            "efficientnet_b0",
+            "efficientnet_b2",
+        }
+
+        if self.backbone not in supported_dl_backbones:
             raise ValueError(
                 f"Unsupported deep_learning.backbone: {self.backbone}. "
-                f"Supported backbones: {list(SUPPORTED_BACKBONES)}"
+                f"Supported backbones: {sorted(supported_dl_backbones)}"
             )
 
         if int(self.image_size) <= 0:
@@ -616,20 +636,35 @@ class DeepLearningConfig:
         if int(self.batch_size) <= 0:
             raise ValueError("deep_learning.batch_size must be positive")
 
-        if int(self.head_epochs) < 0:
-            raise ValueError("deep_learning.head_epochs must be non-negative")
+        if int(self.num_workers) < 0:
+            raise ValueError("deep_learning.num_workers must be non-negative")
 
-        if int(self.fine_tune_epochs) < 0:
-            raise ValueError("deep_learning.fine_tune_epochs must be non-negative")
+        if int(self.epochs) <= 0:
+            raise ValueError("deep_learning.epochs must be positive")
 
-        if not 0 <= float(self.dropout) < 1:
-            raise ValueError("deep_learning.dropout must be in [0, 1)")
+        if int(self.freeze_epochs) < 0:
+            raise ValueError("deep_learning.freeze_epochs must be non-negative")
 
-        if float(self.head_lr) <= 0:
-            raise ValueError("deep_learning.head_lr must be positive")
+        if int(self.freeze_epochs) >= int(self.epochs):
+            raise ValueError("deep_learning.freeze_epochs must be smaller than deep_learning.epochs")
 
-        if float(self.fine_tune_lr) <= 0:
-            raise ValueError("deep_learning.fine_tune_lr must be positive")
+        if float(self.lr) <= 0:
+            raise ValueError("deep_learning.lr must be positive")
+
+        if float(self.unfreeze_lr) <= 0:
+            raise ValueError("deep_learning.unfreeze_lr must be positive")
+
+        if float(self.weight_decay) < 0:
+            raise ValueError("deep_learning.weight_decay must be non-negative")
+
+        if not 0 <= float(self.dropout_head) < 1:
+            raise ValueError("deep_learning.dropout_head must be in [0, 1)")
+
+        if not 0 <= float(self.label_smoothing) < 1:
+            raise ValueError("deep_learning.label_smoothing must be in [0, 1)")
+
+        if int(self.early_stopping_patience) <= 0:
+            raise ValueError("deep_learning.early_stopping_patience must be positive")
 
 
 # -----------------------------------------------------------------------------
