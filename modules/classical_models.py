@@ -11,28 +11,12 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from modules.config_utils import SUPPORTED_CLASSIFIERS
-
-
-def list_supported_classifiers() -> list[str]:
-    """Return supported classical classifier names."""
-    return list(SUPPORTED_CLASSIFIERS)
-
-
-def _normalize_classifier_name(name: str) -> str:
-    """Normalize and validate classifier name."""
-    normalized = name.lower().strip()
-    if normalized not in SUPPORTED_CLASSIFIERS:
-        raise ValueError(
-            f"Unsupported classifier: {name}. "
-            f"Supported classifiers: {list_supported_classifiers()}"
-        )
-    return normalized
+from modules.config_utils import SUPPORTED_CLASSIFIERS, validate_and_normalize
 
 
 def get_param_grid(classifier_name: str, grid_size: str = "small") -> dict[str, Any]:
     """Return a default parameter grid for the requested classifier."""
-    classifier_name = _normalize_classifier_name(classifier_name)
+    classifier_name = validate_and_normalize(classifier_name, SUPPORTED_CLASSIFIERS, "classifier")
     normalized_grid_size = grid_size.lower().strip()
 
     if normalized_grid_size not in {"small", "large"}:
@@ -132,7 +116,7 @@ def get_classifier(
     **overrides: Any,
 ) -> BaseEstimator:
     """Build a classical classifier from a name and parameter dictionary."""
-    name = _normalize_classifier_name(name)
+    name = validate_and_normalize(name, SUPPORTED_CLASSIFIERS, "classifier")
 
     final_params = dict(params or {})
     final_params.update(overrides)
@@ -296,7 +280,7 @@ def _normalize_param_grid_for_estimator(
     param_grid: dict[str, Any],
 ) -> dict[str, Any]:
     """Map simple classifier params to sklearn Pipeline params when needed."""
-    name = _normalize_classifier_name(classifier_name)
+    name = validate_and_normalize(classifier_name, SUPPORTED_CLASSIFIERS, "classifier")
 
     if name in {"logistic_regression", "svm_linear"}:
         return {
