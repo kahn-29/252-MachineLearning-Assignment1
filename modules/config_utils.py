@@ -130,6 +130,17 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def validate_and_normalize(name: str, supported_list: tuple[str, ...], entity_name: str = "option") -> str:
+    """Normalize a string and validate it against a supported list."""
+    normalized = name.lower().strip()
+    if normalized not in supported_list:
+        raise ValueError(
+            f"Unsupported {entity_name}: '{name}'. "
+            f"Supported {entity_name}s: {list(supported_list)}"
+        )
+    return normalized
+
+
 __all__ = [
     "PROJECT_NAME",
     "DEFAULT_SEED",
@@ -145,4 +156,5 @@ __all__ = [
     "config_to_run_name",
     "save_config",
     "load_config",
+    "validate_and_normalize",
 ]
