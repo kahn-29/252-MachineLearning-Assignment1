@@ -188,7 +188,6 @@ Artifact saving/loading utilities.
 | `save_numpy(array, path)`                                                | NumPy array, path                       | `None`                          | Saves `.npy` array.                                       |
 | `load_numpy(path)`                                                       | Path                                    | `np.ndarray`                    | Loads `.npy` with `allow_pickle=False`.                   |
 | `save_pickle(obj, path)`                                                 | Trusted Python object, path             | `None`                          | Saves trusted object to pickle.                           |
-| `load_pickle(path)`                                                      | Trusted pickle path                     | `Any`                           | Loads trusted pickle object.                              |
 | `save_feature_split(X, y, split_name, output_dir)`                       | Feature matrix, labels, split name, dir | `dict[str, Path]`               | Saves `X_<split>.npy` and `y_<split>.npy`.                |
 | `load_feature_split(split_name, feature_dir)`                            | Split name and feature dir              | `tuple[np.ndarray, np.ndarray]` | Loads cached feature split.                               |
 | `feature_files_exist(feature_dir, split_names=("train", "val", "test"))` | Feature dir and split names             | `bool`                          | Checks whether all cached feature files exist.            |

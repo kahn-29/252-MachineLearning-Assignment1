@@ -88,12 +88,6 @@ def save_pickle(obj: Any, path: str | Path) -> None:
         pickle.dump(obj, file)
 
 
-def load_pickle(path: str | Path) -> Any:
-    """Load a trusted pickle file only."""
-    with Path(path).open("rb") as file:
-        return pickle.load(file)
-
-
 def save_feature_split(X: np.ndarray, y: np.ndarray, split_name: str, output_dir: str | Path) -> dict[str, Path]:
     """Save a feature split using the X_<split>.npy / y_<split>.npy convention."""
     output_dir = Path(output_dir)
@@ -130,7 +124,6 @@ __all__ = [
     "save_numpy",
     "load_numpy",
     "save_pickle",
-    "load_pickle",
     "save_feature_split",
     "load_feature_split",
     "feature_files_exist"
