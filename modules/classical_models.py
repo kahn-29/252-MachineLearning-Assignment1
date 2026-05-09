@@ -190,90 +190,6 @@ def train_classifier(
     model.fit(X_train, y_train)
     return model
 
-def _classifier_run_name(cfg: dict, index: int) -> str:
-    """Build a stable display/run name for a classifier config."""
-    if "run_name" in cfg:
-        return str(cfg["run_name"])
-
-    name = str(cfg["name"])
-    params = cfg.get("params", {})
-
-    if not params:
-        return f"{index:02d}_{name}"
-
-    short_params = "_".join(f"{key}-{value}" for key, value in sorted(params.items()))
-    return f"{index:02d}_{name}_{short_params}"
-
-
-def benchmark_classifiers(
-    X_train,
-    y_train,
-    X_val,
-    y_val,
-    classifier_configs: list[dict],
-    seed: int = 42,
-) -> tuple[pd.DataFrame, dict[str, BaseEstimator]]:
-    """Train multiple classifiers and compute validation metrics."""
-    if not classifier_configs:
-        raise ValueError("classifier_configs must contain at least one classifier config.")
-
-    rows: list[dict[str, Any]] = []
-    trained: dict[str, BaseEstimator] = {}
-
-    for index, cfg in enumerate(classifier_configs):
-        if "name" not in cfg:
-            raise KeyError(f"Missing 'name' in classifier config at index {index}: {cfg}")
-
-        name = str(cfg["name"])
-        params = dict(cfg.get("params", {}))
-        run_name = _classifier_run_name(cfg, index)
-
-        model = train_classifier(X_train, y_train, name, seed=seed, **params)
-        preds = model.predict(X_val)
-
-        trained[run_name] = model
-        rows.append({
-            "run_name": run_name,
-            "model": name,
-            "params": params,
-            "accuracy": accuracy_score(y_val, preds),
-            "precision_macro": precision_score(y_val, preds, average="macro", zero_division=0),
-            "recall_macro": recall_score(y_val, preds, average="macro", zero_division=0),
-            "f1_macro": f1_score(y_val, preds, average="macro", zero_division=0),
-        })
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values("f1_macro", ascending=False)
-        .reset_index(drop=True),
-        trained,
-    )
-
-
-def select_best_model(
-    results_df: pd.DataFrame,
-    trained_models: dict[str, BaseEstimator],
-    metric: str = "f1_macro",
-    model_key_col: str = "run_name",
-) -> tuple[str, BaseEstimator, pd.Series]:
-    """Select the best trained model from benchmark results."""
-    if results_df.empty:
-        raise ValueError("results_df is empty; cannot select best model.")
-
-    if metric not in results_df.columns:
-        raise ValueError(f"Metric '{metric}' not found in results_df columns: {list(results_df.columns)}")
-
-    if model_key_col not in results_df.columns:
-        raise ValueError(f"Model key column '{model_key_col}' not found in results_df.")
-
-    best_row = results_df.sort_values(metric, ascending=False).iloc[0]
-    model_key = str(best_row[model_key_col])
-
-    if model_key not in trained_models:
-        raise KeyError(f"Model '{model_key}' not found in trained_models.")
-
-    return model_key, trained_models[model_key], best_row
-
 
 def _normalize_param_grid_for_estimator(
     classifier_name: str,
@@ -322,9 +238,9 @@ def _normalize_scoring(
         )
 
     return scoring_map, refit_metric
+    
 
-
-def tune_with_params(
+def tune_classifier_grid(
     X_train,
     y_train,
     classifier_name: str,
@@ -337,22 +253,70 @@ def tune_with_params(
     refit: str | None = None,
     n_jobs: int = -1,
     verbose: int = 1,
-    return_train_score: bool = True,
+    return_train_score: bool = False,
 ) -> GridSearchCV:
-    """Perform grid search tuning with optional default grid lookup."""
+    """
+    Thực hiện Grid Search. Nếu là Ensemble (Voting/Stacking), 
+    hàm tự động tối ưu base models trước rồi mới tune Ensemble.
+    """
+    name = validate_and_normalize(classifier_name, SUPPORTED_CLASSIFIERS, "classifier")
+
+    if name in {"voting_soft", "stacking"}:
+        base_names = ["logistic_regression", "svm_linear", "random_forest"]
+        optimized_base_params = {}
+
+        for b_name in base_names:
+            if verbose > 0:
+                print(f" >> [Stage 1] Đang tối ưu base model: {b_name}...")
+            
+            b_search = tune_classifier_grid(
+                X_train, y_train, b_name, 
+                grid_size=grid_size, cv=cv, seed=seed, 
+                scoring=scoring, n_jobs=n_jobs, verbose=0
+            )
+            
+            optimized_base_params[b_name] = {
+                k.replace("clf__", ""): v for k, v in b_search.best_params_.items()
+            }
+
+        if verbose > 0:
+            print(f" >> [Stage 2] Đang tune tham số cuối cho Ensemble: {name}...")
+        
+        estimators = [
+            ("lr", _build_logistic_regression(seed=seed, **optimized_base_params["logistic_regression"])),
+            ("svm", _build_svm_linear(seed=seed, **optimized_base_params["svm_linear"])),
+            ("rf", _build_random_forest(seed=seed, **optimized_base_params["random_forest"])),
+        ]
+
+        if name == "voting_soft":
+            ensemble_model = VotingClassifier(estimators=estimators, voting="soft", n_jobs=n_jobs)
+            final_param_grid = {"weights": [(1, 1, 1), (2, 1, 1), (1, 2, 1), (1, 1, 2)]}
+        else: 
+            ensemble_model = StackingClassifier(
+                estimators=estimators,
+                final_estimator=LogisticRegression(random_state=seed, max_iter=3000),
+                n_jobs=n_jobs
+            )
+            final_param_grid = {"final_estimator__C": [0.1, 1.0, 10.0]}
+
+        search = GridSearchCV(
+            estimator=ensemble_model,
+            param_grid=final_param_grid,
+            cv=cv,
+            scoring=scoring,
+            refit=refit or (scoring if isinstance(scoring, str) else scoring[0]),
+            n_jobs=n_jobs,
+            verbose=verbose,
+            return_train_score=return_train_score
+        )
+        search.fit(X_train, y_train)
+        return search
+    # Tuning the base model (LR, SVM, RF)
     if param_grid is None:
-        param_grid = get_param_grid(classifier_name, grid_size)
+        param_grid = get_param_grid(name, grid_size)
 
-    if not param_grid:
-        raise ValueError("param_grid must not be empty.")
-
-    estimator = get_classifier(
-        classifier_name,
-        seed=seed,
-        params=base_params,
-    )
-
-    normalized_grid = _normalize_param_grid_for_estimator(classifier_name, param_grid)
+    estimator = get_classifier(name, seed=seed, params=base_params)
+    normalized_grid = _normalize_param_grid_for_estimator(name, param_grid)
     normalized_scoring, refit_metric = _normalize_scoring(scoring, refit=refit)
 
     search = GridSearchCV(
@@ -365,37 +329,5 @@ def tune_with_params(
         verbose=verbose,
         return_train_score=return_train_score,
     )
-
     search.fit(X_train, y_train)
     return search
-
-
-def tune_classifier_grid(
-    X_train,
-    y_train,
-    classifier_name: str,
-    param_grid: dict[str, Any],
-    base_params: dict[str, Any] | None = None,
-    cv: int = 3,
-    seed: int = 42,
-    scoring: str | list[str] | tuple[str, ...] = "f1_macro",
-    refit: str | None = None,
-    n_jobs: int = -1,
-    verbose: int = 2,
-    return_train_score: bool = False,
-) -> GridSearchCV:
-    """Perform grid search hyperparameter tuning on a classifier."""
-    return tune_with_params(
-        X_train=X_train,
-        y_train=y_train,
-        classifier_name=classifier_name,
-        param_grid=param_grid,
-        base_params=base_params,
-        cv=cv,
-        seed=seed,
-        scoring=scoring,
-        refit=refit,
-        n_jobs=n_jobs,
-        verbose=verbose,
-        return_train_score=return_train_score,
-    )
