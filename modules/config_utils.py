@@ -4,7 +4,7 @@ Configuration and runtime utilities for the cat/dog image-classification project
 
 from __future__ import annotations
 
-import copy
+from copy import deepcopy
 import json
 import math
 import os
@@ -113,31 +113,40 @@ def resolve_workspace(
 # -----------------------------------------------------------------------------
 
 
+REPLACE_KEYS = {
+    ("classifier", "params"),
+}
+
+
 def deep_update(
-    default: Mapping[str, Any],
-    override: Mapping[str, Any] | None = None,
+    base: Mapping[str, Any],
+    updates: Mapping[str, Any] | None = None,
+    path: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Return a deep-merged config without mutating ``default``.
+    """Return a deep-merged config without mutating ``base``.
 
     Nested dictionaries are merged recursively. Non-dictionary values in
-    ``override`` replace values from ``default``.
+    ``updates`` replace values from ``base``. Some nested dictionaries,
+    such as ``classifier.params``, are replaced atomically.
     """
-    result: dict[str, Any] = copy.deepcopy(dict(default))
-    if not override:
+    result: dict[str, Any] = deepcopy(dict(base))
+    if not updates:
         return result
 
-    def _merge(base: MutableMapping[str, Any], patch: Mapping[str, Any]) -> MutableMapping[str, Any]:
-        for key, value in patch.items():
-            if key in base and isinstance(base[key], MutableMapping) and isinstance(value, Mapping):
-                _merge(base[key], value)  # type: ignore[arg-type]
-            else:
-                base[key] = copy.deepcopy(value)
-        return base
+    for key, value in updates.items():
+        current_path = path + (str(key),)
 
-    return dict(_merge(result, override))
+        if current_path in REPLACE_KEYS:
+            result[key] = deepcopy(value)
+        elif key in result and isinstance(result[key], MutableMapping) and isinstance(value, Mapping):
+            result[key] = deep_update(result[key], value, current_path)
+        else:
+            result[key] = deepcopy(value)
+
+    return result
 
 
-def get_default_config() -> dict[str, Any]:
+def get_default_config(user_config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Return the project's default configuration as a fresh deep copy."""
     workspace = resolve_workspace(project_name=PROJECT_NAME)
 
@@ -269,7 +278,10 @@ def get_default_config() -> dict[str, Any]:
         },
     }
 
-    return copy.deepcopy(config)
+    if user_config is not None:
+        config = deep_update(config, user_config)
+
+    return deepcopy(config)
 
 
 def validate_config(config: Mapping[str, Any]) -> None:
