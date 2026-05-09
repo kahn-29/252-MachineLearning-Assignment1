@@ -256,8 +256,7 @@ def tune_classifier_grid(
     return_train_score: bool = False,
 ) -> GridSearchCV:
     """
-    Thực hiện Grid Search. Nếu là Ensemble (Voting/Stacking), 
-    hàm tự động tối ưu base models trước rồi mới tune Ensemble.
+    Perform grid search logic for ensemble models with 2-stage tuning 
     """
     name = validate_and_normalize(classifier_name, SUPPORTED_CLASSIFIERS, "classifier")
 
