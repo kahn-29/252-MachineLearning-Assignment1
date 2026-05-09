@@ -331,7 +331,6 @@ Private helpers:
 | ------------------------------------------------------ | ---------------------------- | -------------- | -------------------------------------- |
 | `_is_finite_number(value)`                             | Any value                    | `bool`         | Checks finite numeric value.           |
 | `_config_value(config, key, default)`                  | Config, key, default         | `float`        | Reads numeric threshold safely.        |
-| `_boolean_series(index, value=False)`                  | Dataframe index              | `pd.Series`    | Creates aligned bool series.           |
 | `_numeric_series(df, column, default=np.nan)`          | Dataframe and column         | `pd.Series`    | Reads numeric column safely.           |
 | `_rank_score(df, col, ascending=True)`                 | Dataframe, column, direction | `pd.Series`    | Percentile quality score component.    |
 | `_valid_hex_hash(value)`                               | Hash value                   | `str \| None`  | Validates/normalizes phash.            |

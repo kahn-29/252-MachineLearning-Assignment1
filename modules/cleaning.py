@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TypeVar, Any
 
 import numpy as np
 import pandas as pd
@@ -108,11 +108,6 @@ class _UnionFind:
             self.rank[left_root] += 1
 
 
-def _boolean_series(index: pd.Index, value: bool = False) -> pd.Series:
-    """Create a boolean series aligned with ``index``."""
-    return pd.Series(value, index=index, dtype=bool)
-
-
 def _numeric_series(
     df: pd.DataFrame,
     column: str,
@@ -124,24 +119,15 @@ def _numeric_series(
     return pd.to_numeric(df[column], errors="coerce")
 
 
-def _config_float(config: Mapping[str, Any], key: str, default: float) -> float:
-    """Read a numeric threshold from a config with a safe default."""
+T = TypeVar('T', int, float)
+
+def _config_value(config: Mapping[str, Any], key: str, default: T, cast_type: type[T]) -> T:
+    """Read a value from a config with a safe default and type casting."""
     value = config.get(key, default)
     if value is None:
         return default
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _config_int(config: Mapping[str, Any], key: str, default: int) -> int:
-    """Read an integer value from a config with a safe default."""
-    value = config.get(key, default)
-    if value is None:
-        return default
-    try:
-        return int(value)
+        return cast_type(value)
     except (TypeError, ValueError):
         return default
 
@@ -217,7 +203,7 @@ def _ensure_duplicate_columns(
     if required.issubset(audit_df.columns):
         return audit_df.copy()
 
-    threshold = _config_int(cleaning_config, "duplicate_hamming_threshold", 4)
+    threshold = _config_value(cleaning_config, "duplicate_hamming_threshold", 4, int)
     return mark_near_duplicates(audit_df, hamming_threshold=threshold)
 
 
@@ -233,11 +219,6 @@ def _select_duplicate_representative(group_frame: pd.DataFrame) -> Hashable:
         ascending.append(True)
 
     return sort_frame.sort_values(by=by, ascending=ascending, kind="mergesort").index[0]
-
-
-def _collect_row_reasons(row: pd.Series) -> list[str]:
-    """Collect ordered removal reasons from a row of flag columns."""
-    return [reason for flag, reason in _REASON_MAP.items() if bool(row.get(flag, False))]
 
 
 # -----------------------------------------------------------------------------
@@ -391,45 +372,45 @@ def compute_soft_flags(
         return _add_false_flags(result)
 
     index = result.index
-    corrupted = result.get("is_corrupted", _boolean_series(index, False)).fillna(False).astype(bool)
-    duplicate = result.get("is_duplicate_to_remove", _boolean_series(index, False)).fillna(False).astype(bool)
+    corrupted = result.get("is_corrupted", pd.Series(False, index=index, dtype=bool)).fillna(False).astype(bool)
+    duplicate = result.get("is_duplicate_to_remove", pd.Series(False, index=index, dtype=bool)).fillna(False).astype(bool)
 
     result["flag_corrupted"] = corrupted & bool(cleaning_config.get("remove_corrupted", True))
     result["flag_duplicate"] = duplicate & bool(cleaning_config.get("remove_duplicates", False))
 
-    result["flag_too_small"] = _numeric_series(result, "min_side") < _config_float(
-        cleaning_config, "min_side", -np.inf
+    result["flag_too_small"] = _numeric_series(result, "min_side") < _config_value(
+        cleaning_config, "min_side", -np.inf, float
     )
-    result["flag_extreme_aspect"] = _numeric_series(result, "aspect_extremity") > _config_float(
-        cleaning_config, "max_aspect_extremity", np.inf
+    result["flag_extreme_aspect"] = _numeric_series(result, "aspect_extremity") > _config_value(
+        cleaning_config, "max_aspect_extremity", np.inf, float
     )
-    result["flag_blurry"] = _numeric_series(result, "blur_laplacian") < _config_float(
-        cleaning_config, "min_blur_laplacian", -np.inf
+    result["flag_blurry"] = _numeric_series(result, "blur_laplacian") < _config_value(
+        cleaning_config, "min_blur_laplacian", -np.inf, float
     )
-    result["flag_low_entropy"] = _numeric_series(result, "entropy") < _config_float(
-        cleaning_config, "min_entropy", -np.inf
+    result["flag_low_entropy"] = _numeric_series(result, "entropy") < _config_value(
+        cleaning_config, "min_entropy", -np.inf, float
     )
-    result["flag_near_mono"] = _numeric_series(result, "near_mono_ratio") > _config_float(
-        cleaning_config, "max_near_mono_ratio", np.inf
+    result["flag_near_mono"] = _numeric_series(result, "near_mono_ratio") > _config_value(
+        cleaning_config, "max_near_mono_ratio", np.inf, float
     )
-    result["flag_too_dark"] = _numeric_series(result, "dark_ratio") > _config_float(
-        cleaning_config, "max_dark_ratio", np.inf
+    result["flag_too_dark"] = _numeric_series(result, "dark_ratio") > _config_value(
+        cleaning_config, "max_dark_ratio", np.inf, float
     )
-    result["flag_too_bright"] = _numeric_series(result, "bright_ratio") > _config_float(
-        cleaning_config, "max_bright_ratio", np.inf
+    result["flag_too_bright"] = _numeric_series(result, "bright_ratio") > _config_value(
+        cleaning_config, "max_bright_ratio", np.inf, float
     )
-    result["flag_low_saturation"] = _numeric_series(result, "mean_sat") < _config_float(
-        cleaning_config, "min_mean_sat", -np.inf
+    result["flag_low_saturation"] = _numeric_series(result, "mean_sat") < _config_value(
+        cleaning_config, "min_mean_sat", -np.inf, float
     )
-    result["flag_low_chroma"] = _numeric_series(result, "chroma_mean") < _config_float(
-        cleaning_config, "min_chroma_mean", -np.inf
+    result["flag_low_chroma"] = _numeric_series(result, "chroma_mean") < _config_value(
+        cleaning_config, "min_chroma_mean", -np.inf, float
     )
     result["flag_low_center_saliency"] = _numeric_series(
         result, "center_saliency_ratio"
-    ) < _config_float(cleaning_config, "min_center_saliency_ratio", -np.inf)
+    ) < _config_value(cleaning_config, "min_center_saliency_ratio", -np.inf, float)
     result["flag_compression_artifact"] = _numeric_series(
         result, "compression_artifact"
-    ) > _config_float(cleaning_config, "max_compression_artifact", np.inf)
+    ) > _config_value(cleaning_config, "max_compression_artifact", np.inf, float)
 
     result[list(_FLAG_COLUMNS)] = result[list(_FLAG_COLUMNS)].fillna(False).astype(bool)
     return result
@@ -456,8 +437,7 @@ def assign_removal_reasons(
     """Add ``keep``, ``removal_reason``, and ``removal_reasons`` columns."""
     working_df = _ensure_duplicate_columns(audit_df, cleaning_config)
     result = compute_soft_flags(working_df, cleaning_config)
-
-    row_reasons = result.apply(_collect_row_reasons, axis=1)
+    row_reasons = result.apply(lambda row: [reason for flag, reason in _REASON_MAP.items() if bool(row.get(flag, False))], axis=1)
     result["keep"] = row_reasons.map(len).eq(0)
     result["removal_reason"] = row_reasons.map(lambda reasons: reasons[0] if reasons else "kept")
     result["removal_reasons"] = row_reasons.map(lambda reasons: "|".join(reasons))
