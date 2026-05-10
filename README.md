@@ -1,354 +1,136 @@
 # Cat vs. Dog Image Classification Pipeline
 
-**Course**: Machine Learning (C03117)
-**Semester**: Semester I, Academic Year 2025–2026
-**University**: Ho Chi Minh City University of Technology, VNU-HCM
-**Department**: Faculty of Computer Science and Engineering
-**Instructor**: Dr. Truong Vinh Lan
-**Project Type**: Machine Learning Major Assignment
-**Task**: Binary image classification — Cat vs. Dog
+Machine Learning (C03117) major assignment for binary image classification on the Kaggle `tongpython/cat-and-dog` dataset.
 
----
+This repository compares two pipelines:
 
-## Project Summary
+1. **Hybrid classical pipeline** — frozen pretrained CNN feature extraction followed by traditional classifiers.
+2. **Deep learning pipeline** — end-to-end transfer learning with a trainable classification head and fine-tuning.
 
-This repository contains a machine learning pipeline for binary image classification on cat and dog images. The core pipeline uses pretrained CNN backbones as frozen feature extractors and trains classical machine learning classifiers on the extracted feature vectors. An optional end-to-end deep learning pipeline is included for comparison.
+The main reported operational model is **EfficientNet-B0 frozen features + Logistic Regression**. The deep learning notebook is included as an additional comparison pipeline.
 
-The pipeline consists of the following stages:
+## Project Information
 
-* Dataset download and discovery in Google Colab
-* Exploratory data analysis (EDA)
-* Image metadata analysis
-* Image quality auditing
-* Data cleaning and threshold analysis
-* Image preprocessing and transformation
-* Feature extraction using pretrained CNN backbones
-* Feature caching as `.npy` files
-* Classical classifier training
-* Hyperparameter tuning
-* Model evaluation
-* Visualization and artifact export
-* Optional transfer-learning pipeline
+| Item | Details |
+|---|---|
+| Course | Machine Learning (C03117) |
+| Semester | Semester 252 |
+| University | Ho Chi Minh City University of Technology, VNU-HCM |
+| Faculty | Faculty of Computer Science and Engineering |
+| Instructor | Dr. Truong Vinh Lan |
+| Task | Binary image classification: Cat vs. Dog |
 
-Execution environment: Google Colab only. Local setup and Kaggle runtime not required.
+## Quick Start
 
----
+### Run in Google Colab
 
-## Assignment Alignment
+1. Open `notebooks/1_Traditional_Machine_Learning_Pipeline.ipynb`.
+2. Select **Runtime → Run all**.
+3. Run `notebooks/2_Deep_Learning_Pipeline.ipynb` only when the deep learning comparison is needed.
 
-| Requirement                | Implementation                                                                               |
-| -------------------------- | -------------------------------------------------------------------------------------------- |
-| Google Colab execution     | Main workflow executed through Colab notebooks in `notebooks/`.                              |
-| Traditional ML pipeline    | Frozen feature extraction with classical classifiers.                                        |
-| Image EDA                  | Class distribution, image size, channel analysis, and RGB statistics.                        |
-| Preprocessing              | Resize, crop, letterbox, and augmentation modes.                                             |
-| Feature extraction         | Pretrained CNN backbones: VGG16, ResNet18, ResNet50, EfficientNet-B0, EfficientNet-B2.       |
-| Feature storage            | Features saved as `.npy` files with manifests.                                               |
-| Classifier training        | Logistic Regression, Linear SVM, Random Forest, Soft Voting, Stacking.                       |
-| Evaluation metrics         | Accuracy, precision, recall, F1-score, confusion matrix, wrong predictions.                  |
-| Experiment support         | Grid search across preprocessing, backbone, and classifier variations.                      |
-| Transfer learning          | Optional end-to-end transfer-learning pipeline.                                              |
-| Output structure           | `notebooks/`, `modules/`, `features/`, `reports/`, `results/`, `models/` directories.        |
+The notebooks handle environment setup, dataset discovery/download, output-directory creation, model training, evaluation, and artifact export.
 
----
+### Main notebooks
 
-## Repository Contents
+| Notebook | Purpose |
+|---|---|
+| `notebooks/1_Traditional_Machine_Learning_Pipeline.ipynb` | Main required classical ML workflow |
+| `notebooks/2_Deep_Learning_Pipeline.ipynb` | End-to-end transfer learning comparison |
+| `notebooks/experiments/Grid_Search.ipynb` | Exhaustive classical experiment search |
+| `notebooks/experiments/Sweet_Spot_Threshold.ipynb` | Cleaning-threshold analysis |
+
+## Repository Structure
 
 ```text
-cat-dog-image-classifier/
+.
 ├── README.md
-├── MODULES.md
-├── notebooks/
-│   ├── classical_pipeline.ipynb
-│   ├── cleaning_threshold_experiments.ipynb
-│   └── deep_learning_pipeline.ipynb
+├── features/
 ├── modules/
-│   ├── __init__.py
+│   ├── MODULES.md
+│   ├── artifacts.py
+│   ├── backbones.py
+│   ├── classical_models.py
+│   ├── cleaning.py
+│   ├── config_types.py
 │   ├── config_utils.py
 │   ├── data_utils.py
-│   ├── image_audit.py
-│   ├── cleaning.py
-│   ├── threshold_experiments.py
-│   ├── transforms.py
 │   ├── datasets.py
-│   ├── backbones.py
-│   ├── feature_extraction.py
-│   ├── classical_models.py
 │   ├── deep_learning.py
 │   ├── evaluation.py
+│   ├── feature_extraction.py
 │   ├── grid_search.py
-│   ├── artifacts.py
+│   ├── image_audit.py
+│   ├── threshold_experiments.py
+│   ├── transforms.py
 │   └── visualization.py
-├── features/
-├── results/
-├── reports/
-│   └── figures/
-├── models/
-└── data/
+├── notebooks/
+│   ├── 1_Traditional_Machine_Learning_Pipeline.ipynb
+│   ├── 2_Deep_Learning_Pipeline.ipynb
+│   └── experiments/
+│       ├── Grid_Search.ipynb
+│       └── Sweet_Spot_Threshold.ipynb
+└── reports/
 ```
 
-Generated folders such as `data/`, `features/`, `results/`, `models/`, and `reports/figures/` may be empty in the repository. The notebooks regenerate these artifacts when executed on Colab.
+Generated artifacts such as cached features, figures, metrics, and trained models are produced by the notebooks during execution.
 
-This repository does **not** use a `requirements.txt` file. Required libraries are installed directly inside the notebook setup cells.
+## Pipeline Overview
 
----
-
-## File and Folder Map
-
-### Root files
-
-* `README.md`: repository overview, workflow, Colab run instructions, outputs, and project notes.
-* `MODULES.md`: detailed package architecture and module API reference.
-
-### `notebooks/`
-
-* `classical_pipeline.ipynb`: main classical machine learning workflow from dataset loading to final evaluation.
-* `cleaning_threshold_experiments.ipynb`: image-quality threshold analysis and cleaning-policy selection.
-* `deep_learning_pipeline.ipynb`: optional transfer-learning workflow for comparison and bonus evaluation.
-
-### `modules/`
-
-* `__init__.py`: package marker.
-* `config_utils.py`: config creation, validation, runtime setup, seed control, and path resolution.
-* `data_utils.py`: dataset discovery, dataframe creation, label inference, splitting, and summaries.
-* `image_audit.py`: image-quality metric computation.
-* `cleaning.py`: cleaning decisions based on audit metrics and config thresholds.
-* `threshold_experiments.py`: cleaning-threshold sweeps and policy selection.
-* `transforms.py`: preprocessing and augmentation transforms.
-* `datasets.py`: PyTorch dataset and dataloader wrappers.
-* `backbones.py`: pretrained backbone loading and transfer-model construction.
-* `feature_extraction.py`: frozen deep-feature extraction and feature-cache handling.
-* `classical_models.py`: classical classifier construction, training, and tuning.
-* `deep_learning.py`: transfer-learning training, prediction, and checkpoint handling.
-* `evaluation.py`: metrics, reports, confusion matrices, and wrong-prediction analysis.
-* `grid_search.py`: classical experiment orchestration across preprocessing, backbone, and classifier settings.
-* `artifacts.py`: saving and loading JSON, dataframes, NumPy arrays, feature splits, and pickle artifacts.
-* `visualization.py`: plotting utilities for EDA, cleaning, evaluation, and reports.
-
-### Output folders
-
-* `data/`: dataset files downloaded or extracted during Colab execution.
-* `features/`: cached feature arrays and feature manifests.
-* `results/`: metrics, grid-search results, and cleaning reports.
-* `reports/`: final report and generated figures.
-* `models/`: saved trained models when included.
-
----
-
-## Main Pipeline - Classical Machine Learning Pipeline
-
-The classical pipeline is the required core pipeline of the project.
+### 1. Hybrid Classical Pipeline
 
 ```text
 Raw images
-→ Dataset download/discovery in Colab
-→ EDA and metadata analysis
-→ Image audit
-→ Cleaning policy selection
-→ Train/validation/test split
-→ Image preprocessing
+→ EDA and image audit
+→ Cleaning-policy analysis
+→ Stratified train/validation/test split
+→ Preprocessing
 → Frozen CNN feature extraction
-→ Save features as .npy
-→ Train classical classifiers
-→ Hyperparameter tuning
-→ Validate and test models
-→ Save metrics, figures, and models
+→ Saved feature arrays (.npy)
+→ Classical classifier training and tuning
+→ Validation, test evaluation, and artifact export
 ```
 
-This pipeline uses pretrained CNNs as fixed feature extractors. The CNN backbone produces feature vectors, and classical machine learning models are trained on top of those vectors.
+Supported classical feature backbones:
 
-Supported backbones:
+- `efficientnet_b0`
+- `resnet18`
+- `vgg16`
 
-* VGG16
-* ResNet18
-* ResNet50
-* EfficientNet-B0
-* EfficientNet-B2
+Supported classical classifiers:
 
-Supported classifiers:
+- `logistic_regression`
+- `svm_linear`
+- `random_forest`
+- `voting_soft`
+- `stacking`
 
-* Logistic Regression
-* Linear SVM
-* Random Forest
-* Soft Voting Classifier
-* Stacking Classifier
-
----
-
-## Optional Deep Learning Pipeline
-
-The deep learning pipeline is an optional extension for comparison.
+### 2. Deep Learning Pipeline
 
 ```text
 Raw images
-→ Dataset download/discovery in Colab
-→ Cleaning and split reuse
-→ Deep learning transforms and augmentation
+→ Preprocessing and augmentation
 → Transfer-learning model construction
-→ Head training
-→ Optional fine-tuning
+→ Frozen-head training
+→ Fine-tuning
 → Validation monitoring
-→ Test evaluation
-→ Comparison with classical pipeline
+→ Test evaluation and comparison
 ```
 
-This pipeline replaces the final classification head of a pretrained backbone and trains it for the cat/dog classification task.
-
----
+Supported deep learning backbones are validated in `modules/config_types.py`.
 
 ## Dataset
 
-The recommended dataset source is:
+Recommended dataset source:
 
 ```text
 tongpython/cat-and-dog
 ```
 
-The dataset is downloaded or prepared directly inside the Colab notebook. The final notebooks should not depend on personal cloud storage such as Google Drive, Dropbox, or OneDrive.
-
----
-
-## Colab Execution
-
-Open `notebooks/1_Traditional_Machine_Learning_Pipeline.ipynb` and select `Runtime → Run all`.
-
-Setup cells in the notebook perform:
-
-1. Library installation
-2. Repository access
-3. Module path configuration
-4. Dataset download or discovery
-5. Output directory creation
-6. Pipeline execution
-
-
----
-
-## Dependencies
-
-Most core libraries are already available in Colab. The notebook installs any missing libraries directly when executing.
-
----
-
-## Execution Workflow
-
-### Classical Machine Learning Pipeline
-
-Notebook: `notebooks/1_Traditional_Machine_Learning_Pipeline.ipynb`
-
-Pipeline stages:
-
-1. Environment setup
-2. Module import
-3. Dataset loading
-4. Exploratory data analysis
-5. Image quality audit
-6. Data cleaning
-7. Train/validation/test split
-8. Preprocessing transform creation
-9. Feature extraction
-10. Feature caching
-11. Classifier training
-12. Hyperparameter tuning
-13. Validation and test evaluation
-14. Metrics and visualization
-15. Artifact export
-
----
-
-### Cleaning Threshold Analysis
-
-Notebook: `notebooks/experiments/Sweet_Spot_Threshold.ipynb`
-
-Analyzes cleaning thresholds and selects optimal cleaning parameters.
-
----
-
-### Deep Learning Pipeline
-
-Notebook: `notebooks/2_Deep_Learning_Pipeline.ipynb`
-
-Trains end-to-end transfer-learning model with comparison to classical pipeline.
-
-Outputs:
-
-```text
-models/dl_best_<backbone>.pt
-results/deep_learning_metrics.json
-reports/figures/dl_training_curves.png
-reports/figures/dl_confusion_matrix.png
-```
-
----
+The notebooks are designed to obtain the dataset inside the runtime environment and should not depend on personal cloud storage paths.
 
 ## Configuration
 
-Pipeline behavior is controlled by a config dictionary.
-
-Default configuration:
-
-```python
-config = {
-    "project": {
-        "name": "cat-dog-image-classifier",
-        "task": "binary_image_classification",
-        "target": "cat_vs_dog",
-    },
-    "seed": 42,
-    "runtime": {
-        "device": "auto",
-        "num_workers": 2,
-        "deterministic": False,
-    },
-    "dataset": {
-        "kaggle_id": "tongpython/cat-and-dog",
-        "local_root": None,
-    },
-    "split": {
-        "train": 0.8,
-        "val": 0.1,
-        "test": 0.1,
-        "seed": 42,
-    },
-    "cleaning": {
-        "remove_corrupted": True,
-        "remove_duplicates": False,
-        "duplicate_hamming_threshold": 4,
-        "min_side": 64,
-        "max_aspect_extremity": 5.0,
-        "min_blur_laplacian": 40.0,
-        "max_near_mono_ratio": 0.92,
-        "max_dark_ratio": 0.98,
-        "max_bright_ratio": 0.98,
-    },
-    "preprocessing": {
-        "mode": "augmented",
-        "image_size": 224,
-        "train_augmentation": False,
-        "normalize": "imagenet",
-    },
-    "feature_extraction": {
-        "backbone": "efficientnet_b0",
-        "batch_size": 64,
-        "num_workers": 2,
-        "pretrained": True,
-        "data_parallel": False,
-    },
-    "classifier": {
-        "name": "logistic_regression",
-        "params": {},
-    },
-    "hyperparameter_tuning": {
-        "enabled": True,
-        "grid_size": "small",
-        "cv": 3,
-        "scoring": "f1_macro",
-        "n_jobs": -1,
-    },
-}
-```
-
-Configuration validation:
+Configuration is centralized in the `modules/` package and validated through typed config objects.
 
 ```python
 from modules.config_utils import get_default_config, validate_config
@@ -357,116 +139,86 @@ config = get_default_config()
 validate_config(config)
 ```
 
----
+Main config sections:
 
-## Feature Caching
+- `dataset`
+- `split`
+- `cleaning`
+- `preprocessing`
+- `feature_extraction`
+- `classifier`
+- `tune-hyperparameter`
+- `deep_learning`
 
-Extracted features are saved as `.npy` files.
+The exact supported values and defaults are defined in `modules/config_types.py`.
 
-Folder structure:
+## Outputs
 
-```text
-features/
-└── efficientnet_b0_224_augmented/
-    ├── X_train.npy
-    ├── y_train.npy
-    ├── X_val.npy
-    ├── y_val.npy
-    ├── X_test.npy
-    ├── y_test.npy
-    └── manifest.json
-```
-
-Manifest contents:
+Typical generated outputs include:
 
 ```text
-backbone_name
-pretrained
-image_size
-preprocessing_mode
-feature_dim
-split_sizes
-created_at
+features/                  cached feature arrays and manifests
+reports/figures/           EDA and evaluation figures
+reports/results/           metrics, summaries, and CSV outputs
+models/                    trained model artifacts when saved
 ```
 
----
+Examples of saved artifacts:
 
-## Experiments
+- `X_train.npy`, `X_val.npy`, `X_test.npy`
+- `y_train.npy`, `y_val.npy`, `y_test.npy`
+- experiment summaries in JSON/CSV format
+- confusion matrices and wrong-prediction galleries
+- trained classical or deep learning model files
 
-Example search space:
+## Evaluation
 
-```python
-search_space = {
-    "preprocessing.mode": ["stretch", "center_crop", "letterbox", "augmented"],
-    "preprocessing.image_size": [224],
-    "feature_extraction.backbone": ["vgg16", "resnet18", "efficientnet_b0"],
-    "classifier.name": [
-        "logistic_regression",
-        "svm_linear",
-        "random_forest",
-        "voting_soft",
-        "stacking",
-    ],
-}
-```
+The project reports standard classification metrics:
 
-Example experiment scale:
+- accuracy
+- precision
+- recall
+- macro F1-score
+- confusion matrix
+- wrong-prediction analysis
+- ROC-AUC when probability outputs are available
 
-```text
-4 preprocessing modes × 1 image size × 3 backbones × 11 classifier variants = 132 experiments
-```
+## Reported Results
 
-Primary ranking metric: macro F1-score
+The latest report compares:
 
-Secondary metrics: validation accuracy, inference time, training time
+- **Hybrid classical pipeline:** EfficientNet-B0 frozen features + Logistic Regression
+- **Deep learning pipeline:** fine-tuned EfficientNet-B0
 
----
+See `reports/` for the full report and generated figures.
 
-## Evaluation Metrics
+## Assignment Alignment
 
-The project reports:
+| Requirement | Implementation |
+|---|---|
+| Image EDA | Class balance, image-size analysis, RGB analysis, sample visualization |
+| Preprocessing | Resize, normalization, augmentation modes |
+| Feature extraction | Pretrained CNN backbones with saved `.npy` features |
+| Traditional ML | Logistic Regression, Linear SVM, Random Forest, Soft Voting, Stacking |
+| Evaluation | Accuracy, precision, recall, macro F1, confusion matrix, wrong predictions |
+| Experiments | Cleaning-threshold analysis and classical grid search |
+| Extension | End-to-end deep learning transfer-learning pipeline |
 
-| Metric            | Meaning                                           |
-| ----------------- | ------------------------------------------------- |
-| Accuracy          | Overall percentage of correct predictions.        |
-| Precision         | Fraction of predicted positives that are correct. |
-| Recall            | Fraction of actual positives that are detected.   |
-| F1-score          | Harmonic mean of precision and recall.            |
-| Macro F1-score    | Average F1-score across classes.                  |
-| Confusion Matrix  | Correct and incorrect predictions by class.       |
-| Error Rate        | Percentage of incorrect predictions.              |
-| Wrong Predictions | Misclassified images for qualitative review.      |
+## Reproducibility Notes
 
-The main comparison includes validation accuracy, validation macro F1-score, test accuracy, test macro F1-score, training time, inference time, wrong-prediction count, and confusion matrix.
+- Use the notebooks in the documented order.
+- Keep config changes inside the config system instead of hardcoding values across cells.
+- Use the same random seed when reproducing reported results.
+- Generated folders may be absent before execution; the notebooks recreate them when needed.
 
----
+## Team
 
-## Reproducibility Requirements
+- Nguyễn Mạnh Quốc Khánh — 2352525
+- Phan Ngọc Lan Chi — 2352137
+- Ngô Diễm Quyên — 2353031
+- Trần Lâm Anh — 2352067
+- Vũ Đức Việt Anh — 2352074
 
-* Fixed random seed throughout pipeline
-* Deterministic dataset splitting with seed saving
-* Configuration JSON saved for each experiment run
-* Feature cache manifests for tracking preprocessing parameters
-* Incremental grid-search result logging
-* Public dataset links in notebooks
-* Support for `Runtime → Run all` execution
-* No dependencies on private cloud storage or local paths
+## Module Reference
 
----
-
-## License and Usage
-
-This repository is created for academic purposes as part of the Machine Learning course major assignment.
-
-The code may be reused for learning, experimentation, and educational demonstrations. Dataset usage should follow the license and terms of the original dataset provider.
-
----
-
-## Libraries and Dependencies
-
-Core libraries: PyTorch, torchvision, scikit-learn, pandas, NumPy, Matplotlib, OpenCV, Pillow
-
----
-
-**Course**: Machine Learning (C03117), HCMUT
-**Last Updated**: May 2026
+See [`modules/MODULES.md`](modules/MODULES.md) for a detailed module overview and API notes.
