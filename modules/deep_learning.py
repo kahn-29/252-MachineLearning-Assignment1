@@ -4,7 +4,7 @@ Deep-learning utilities for end-to-end transfer learning.
 
 from __future__ import annotations
 
-import copy
+from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -42,6 +42,35 @@ def _validate_positive_int(value: Any, name: str, allow_zero: bool = False) -> i
     return int_value
 
 
+def _get_mapping(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a shallow mutable dict from any mapping-like config."""
+    return dict(config or {})
+
+
+def _resolve_dl_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize deep-learning configuration.
+
+    The notebook sometimes passes the full project ``CONFIG`` while older helper
+    functions expected only ``CONFIG["deep_learning"]``. This helper accepts both.
+    Values from the dedicated ``deep_learning`` section take priority, while useful
+    defaults are borrowed from ``runtime`` and ``preprocessing`` when available.
+    """
+    full_config = _get_mapping(config)
+
+    if isinstance(full_config.get("deep_learning"), MappingABC):
+        dl_config = _get_mapping(full_config.get("deep_learning"))
+        runtime_config = _get_mapping(full_config.get("runtime"))
+        preprocessing_config = _get_mapping(full_config.get("preprocessing"))
+
+        dl_config.setdefault("device", runtime_config.get("device", "auto"))
+        dl_config.setdefault("num_workers", runtime_config.get("num_workers", 0))
+        dl_config.setdefault("image_size", preprocessing_config.get("image_size", 224))
+        dl_config.setdefault("normalize", preprocessing_config.get("normalize", "imagenet"))
+        return dl_config
+
+    return full_config
+
+
 def _trainable_parameters(model: nn.Module) -> list[nn.Parameter]:
     """Return trainable parameters and fail early if none are trainable."""
     parameters = [param for param in model.parameters() if param.requires_grad]
@@ -66,17 +95,16 @@ def _parameterized_children(model: nn.Module) -> list[nn.Module]:
     return [
         child
         for child in core_model.children()
-        if any(param.requires_grad is not None for param in child.parameters(recurse=True))
+        if any(True for _ in child.parameters(recurse=True))
     ]
 
 
 def unfreeze_last_blocks(model: nn.Module, num_blocks: int = 1) -> nn.Module:
     """Unfreeze the last parameterized child modules of a model.
 
-    This is a generic fallback for torchvision models. For ResNet-like models,
-    using ``num_blocks=2`` usually unfreezes the classifier head and the last
-    convolutional block. For EfficientNet/VGG, it unfreezes the last direct
-    parameterized children.
+    For ResNet-like models, ``num_blocks=2`` usually unfreezes the classifier head
+    and the last convolutional block. For EfficientNet/VGG, this generic fallback
+    unfreezes the last direct parameterized children.
     """
     num_blocks = _validate_positive_int(num_blocks, "num_blocks", allow_zero=True)
     if num_blocks == 0:
@@ -132,16 +160,19 @@ def create_image_dataloaders_for_config(
     test_df: pd.DataFrame,
     config: Mapping[str, Any],
 ) -> dict[str, torch.utils.data.DataLoader]:
-    """Create train/validation/test dataloaders for a deep-learning config."""
-    image_size = config.get("image_size", 224)
-    batch_size = _validate_positive_int(config.get("batch_size", 32), "batch_size")
-    num_workers = _validate_positive_int(config.get("num_workers", 0), "num_workers", allow_zero=True)
+    """Create train/validation/test dataloaders from full CONFIG or DL config."""
+    dl_config = _resolve_dl_config(config)
+
+    image_size = _validate_positive_int(dl_config.get("image_size", 224), "image_size")
+    batch_size = _validate_positive_int(dl_config.get("batch_size", 32), "batch_size")
+    num_workers = _validate_positive_int(dl_config.get("num_workers", 0), "num_workers", allow_zero=True)
+    normalize = str(dl_config.get("normalize", "imagenet"))
 
     splits = {"train": train_df, "val": val_df, "test": test_df}
     transforms = {
-        "train": get_dl_transform(image_size=image_size, train=True),
-        "val": get_dl_transform(image_size=image_size, train=False),
-        "test": get_dl_transform(image_size=image_size, train=False),
+        "train": get_dl_transform(image_size=image_size, train=True, normalize=normalize),
+        "val": get_dl_transform(image_size=image_size, train=False, normalize=normalize),
+        "test": get_dl_transform(image_size=image_size, train=False, normalize=normalize),
     }
 
     return create_image_dataloaders(
@@ -149,9 +180,9 @@ def create_image_dataloaders_for_config(
         transforms=transforms,
         batch_size=batch_size,
         num_workers=num_workers,
-        pin_memory=bool(config.get("pin_memory", torch.cuda.is_available())),
-        path_col=str(config.get("path_col", "path")),
-        label_col=str(config.get("label_col", "label")),
+        pin_memory=bool(dl_config.get("pin_memory", torch.cuda.is_available())),
+        path_col=str(dl_config.get("path_col", "path")),
+        label_col=str(dl_config.get("label_col", "label")),
     )
 
 
@@ -160,19 +191,18 @@ def build_model_for_config(
     num_classes: int,
     device: str | torch.device | None = None,
 ) -> nn.Module:
-    """Build a transfer-learning model from a deep-learning config."""
-    device = _as_device(device or config.get("device", "auto"))
+    """Build a transfer-learning model from full CONFIG or DL config."""
+    dl_config = _resolve_dl_config(config)
+    device = _as_device(device or dl_config.get("device", "auto"))
 
-    model = build_transfer_model(
-        backbone_name=str(config.get("backbone", "efficientnet_b0")),
-        num_classes=num_classes,
-        pretrained=bool(config.get("pretrained", True)),
-        dropout=float(config.get("dropout", 0.2)),
-        freeze_backbone=bool(config.get("freeze_backbone", True)),
+    return build_transfer_model(
+        backbone_name=str(dl_config.get("backbone", "efficientnet_b0")),
+        num_classes=int(num_classes),
+        pretrained=bool(dl_config.get("pretrained", True)),
+        dropout=float(dl_config.get("dropout", dl_config.get("dropout_head", 0.2))),
+        freeze_backbone=bool(dl_config.get("freeze_backbone", True)),
         device=device,
     )
-
-    return model
 
 
 # -----------------------------------------------------------------------------
@@ -182,8 +212,9 @@ def build_model_for_config(
 
 def build_optimizer(model: nn.Module, config: Mapping[str, Any]) -> torch.optim.Optimizer:
     """Build an optimizer over trainable parameters only."""
-    name = str(config.get("name", "adam")).lower().strip()
-    lr = float(config.get("lr", 1e-3))
+    optimizer_config = _get_mapping(config)
+    name = str(optimizer_config.get("name", "adam")).lower().strip()
+    lr = float(optimizer_config.get("lr", 1e-3))
 
     if lr <= 0:
         raise ValueError(f"Optimizer learning rate must be positive, got {lr}.")
@@ -194,22 +225,22 @@ def build_optimizer(model: nn.Module, config: Mapping[str, Any]) -> torch.optim.
         return torch.optim.SGD(
             parameters,
             lr=lr,
-            momentum=float(config.get("momentum", 0.9)),
-            weight_decay=float(config.get("weight_decay", 0.0)),
+            momentum=float(optimizer_config.get("momentum", 0.9)),
+            weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
         )
 
     if name == "adam":
         return torch.optim.Adam(
             parameters,
             lr=lr,
-            weight_decay=float(config.get("weight_decay", 0.0)),
+            weight_decay=float(optimizer_config.get("weight_decay", 0.0)),
         )
 
     if name == "adamw":
         return torch.optim.AdamW(
             parameters,
             lr=lr,
-            weight_decay=float(config.get("weight_decay", 1e-4)),
+            weight_decay=float(optimizer_config.get("weight_decay", 1e-4)),
         )
 
     raise ValueError("Unsupported optimizer name. Expected one of: 'sgd', 'adam', 'adamw'.")
@@ -220,32 +251,33 @@ def build_scheduler(
     config: Mapping[str, Any] | None,
 ) -> torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None:
     """Build an optional learning-rate scheduler."""
-    if not config:
+    scheduler_config = _get_mapping(config)
+    if not scheduler_config:
         return None
 
-    name = str(config.get("name", "none")).lower().strip()
+    name = str(scheduler_config.get("name", "none")).lower().strip()
     if name in {"", "none", "disabled", "off"}:
         return None
 
     if name == "step":
         return torch.optim.lr_scheduler.StepLR(
             optimizer,
-            step_size=_validate_positive_int(config.get("step_size", 3), "step_size"),
-            gamma=float(config.get("gamma", 0.1)),
+            step_size=_validate_positive_int(scheduler_config.get("step_size", 3), "step_size"),
+            gamma=float(scheduler_config.get("gamma", 0.1)),
         )
 
     if name == "cosine":
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=_validate_positive_int(config.get("t_max", 10), "t_max"),
+            T_max=_validate_positive_int(scheduler_config.get("t_max", 10), "t_max"),
         )
 
     if name == "plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            mode=str(config.get("mode", "min")),
-            factor=float(config.get("factor", 0.1)),
-            patience=_validate_positive_int(config.get("patience", 2), "patience", allow_zero=True),
+            mode=str(scheduler_config.get("mode", "min")),
+            factor=float(scheduler_config.get("factor", 0.1)),
+            patience=_validate_positive_int(scheduler_config.get("patience", 2), "patience", allow_zero=True),
         )
 
     raise ValueError("Unsupported scheduler name. Expected one of: 'step', 'cosine', 'plateau', 'none'.")
@@ -339,20 +371,16 @@ def fit_transfer_model(
 ) -> dict[str, Any]:
     """Fit a transfer-learning model using head-training and optional fine-tuning.
 
-    Expected config keys:
-    - ``head_epochs`` or ``epochs``,
-    - ``fine_tune_epochs`` optional,
-    - ``head_lr`` and ``fine_tune_lr`` optional,
-    - ``optimizer`` optional,
-    - ``scheduler`` optional,
-    - ``unfreeze_last_blocks`` optional.
+    Accepts either the full project ``CONFIG`` or the nested ``CONFIG["deep_learning"]``.
     """
+    dl_config = _resolve_dl_config(config)
+
     if "train" not in dataloaders:
         raise KeyError("dataloaders must contain a 'train' loader.")
     if "val" not in dataloaders:
         raise KeyError("dataloaders must contain a 'val' loader.")
 
-    device = _as_device(config.get("device", "auto"))
+    device = _as_device(dl_config.get("device", "auto"))
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
@@ -361,8 +389,8 @@ def fit_transfer_model(
     best_val_f1 = -np.inf
     global_epoch = 0
 
-    head_epochs = int(config.get("head_epochs", config.get("epochs", 1)))
-    fine_tune_epochs = int(config.get("fine_tune_epochs", 0))
+    head_epochs = int(dl_config.get("head_epochs", dl_config.get("epochs", 1)))
+    fine_tune_epochs = int(dl_config.get("fine_tune_epochs", 0))
 
     if head_epochs < 0 or fine_tune_epochs < 0:
         raise ValueError("head_epochs and fine_tune_epochs must be non-negative.")
@@ -372,7 +400,7 @@ def fit_transfer_model(
         phases.append({
             "name": "head",
             "epochs": head_epochs,
-            "lr": float(config.get("head_lr", config.get("lr", 1e-3))),
+            "lr": float(dl_config.get("head_lr", dl_config.get("lr", 1e-3))),
             "unfreeze": False,
         })
 
@@ -380,7 +408,7 @@ def fit_transfer_model(
         phases.append({
             "name": "fine_tune",
             "epochs": fine_tune_epochs,
-            "lr": float(config.get("fine_tune_lr", config.get("lr", 1e-5))),
+            "lr": float(dl_config.get("fine_tune_lr", dl_config.get("lr", 1e-5))),
             "unfreeze": True,
         })
 
@@ -391,15 +419,15 @@ def fit_transfer_model(
         if phase["unfreeze"]:
             unfreeze_last_blocks(
                 model,
-                num_blocks=int(config.get("unfreeze_last_blocks", 1)),
+                num_blocks=int(dl_config.get("unfreeze_last_blocks", 1)),
             )
 
-        optimizer_config = dict(config.get("optimizer", {}))
+        optimizer_config = _get_mapping(dl_config.get("optimizer", {}))
         optimizer_config.setdefault("name", "adam")
         optimizer_config["lr"] = phase["lr"]
 
         optimizer = build_optimizer(model, optimizer_config)
-        scheduler = build_scheduler(optimizer, config.get("scheduler", {}))
+        scheduler = build_scheduler(optimizer, dl_config.get("scheduler", {}))
 
         for _ in range(int(phase["epochs"])):
             global_epoch += 1

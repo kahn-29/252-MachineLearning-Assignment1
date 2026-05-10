@@ -8,6 +8,7 @@ from modules.config_utils import SUPPORTED_BACKBONES, validate_and_normalize
 
 
 def _load_base_model(name: str, pretrained: bool = True) -> nn.Module:
+    """Load a full torchvision model for a supported backbone."""
     name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
 
     if name == "resnet18":
@@ -26,13 +27,23 @@ def _load_base_model(name: str, pretrained: bool = True) -> nn.Module:
 
 
 def _strip_classifier(model: nn.Module, name: str) -> nn.Module:
+    """Remove the classification head and keep only the feature extractor."""
     name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
 
     if name == "resnet18":
         return nn.Sequential(*list(model.children())[:-1])
+
     if name in {"vgg16", "efficientnet_b0"}:
         return nn.Sequential(model.features, nn.AdaptiveAvgPool2d((1, 1)))
+
     raise ValueError(f"Unsupported backbone: {name}")
+
+
+def _resolve_device(device: str | torch.device | None = None) -> torch.device:
+    """Resolve an explicit/auto device value into ``torch.device``."""
+    if device is None or str(device).lower() == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
 
 
 def get_backbone(
@@ -44,9 +55,7 @@ def get_backbone(
 ) -> nn.Module:
     """Load a pretrained backbone and strip its classification head."""
     name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
-
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _resolve_device(device)
 
     base_model = _load_base_model(name, pretrained=pretrained)
     model = _strip_classifier(base_model, name)
@@ -90,8 +99,20 @@ def replace_classifier_head(
     num_classes: int,
     dropout: float = 0.2,
 ) -> nn.Module:
-    """Replace the classification head on a full torchvision model."""
-    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
+    """Replace the classification head on a full torchvision model.
+
+    Parameters
+    ----------
+    model:
+        Full torchvision model, not the stripped feature extractor.
+    backbone_name:
+        One of the supported backbone names.
+    num_classes:
+        Number of output classes.
+    dropout:
+        Dropout probability used before the final linear classifier.
+    """
+    name = validate_and_normalize(backbone_name, SUPPORTED_BACKBONES, "backbone")
 
     if num_classes < 2:
         raise ValueError("num_classes must be >= 2.")
@@ -116,7 +137,7 @@ def replace_classifier_head(
 
     if name == "efficientnet_b0":
         in_features = model.classifier[-1].in_features
-        model.classifier[-1] = nn.Sequential(
+        model.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(in_features, num_classes),
         )
@@ -134,12 +155,15 @@ def build_transfer_model(
     device: str | torch.device | None = None,
 ) -> nn.Module:
     """Build a transfer-learning model with a new classification head."""
-    name = validate_and_normalize(name, SUPPORTED_BACKBONES, "backbone")
+    name = validate_and_normalize(backbone_name, SUPPORTED_BACKBONES, "backbone")
+    device = _resolve_device(device)
+
     model = _load_base_model(name, pretrained=pretrained)
 
     if freeze_backbone:
         freeze_model(model)
 
+    # Replace the head after freezing so the new classifier remains trainable.
     model = replace_classifier_head(
         model=model,
         backbone_name=name,
@@ -147,17 +171,14 @@ def build_transfer_model(
         dropout=dropout,
     )
 
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     return model.to(device)
 
 
 __all__ = [
-  "get_backbone",
-  "get_feature_dim",
-  "freeze_model",
-  "unfreeze_model",
-  "replace_classifier_head",
-  "build_transfer_model"
+    "get_backbone",
+    "get_feature_dim",
+    "freeze_model",
+    "unfreeze_model",
+    "replace_classifier_head",
+    "build_transfer_model",
 ]
