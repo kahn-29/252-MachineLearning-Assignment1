@@ -15,10 +15,19 @@ The main reported operational model is **EfficientNet-B0 frozen features + Logis
 |---|---|
 | Course | Machine Learning (C03117) |
 | Semester | Semester 252 |
+| Academic Year | 2025 |
 | University | Ho Chi Minh City University of Technology, VNU-HCM |
 | Faculty | Faculty of Computer Science and Engineering |
 | Instructor | Dr. Truong Vinh Lan |
 | Task | Binary image classification: Cat vs. Dog |
+
+## Team
+
+- Nguyễn Mạnh Quốc Khánh — 2352525 — `khanh.nguyenmanh@hcmut.edu.vn`
+- Phan Ngọc Lan Chi — 2352137 — `chi.phanlanchi1906@hcmut.edu.vn`
+- Ngô Diễm Quyên — 2353031 — `quyen.ngo6905@hcmut.edu.vn`
+- Trần Lâm Anh — 2352067 — `anh.tranlam@hcmut.edu.vn`
+- Vũ Đức Việt Anh — 2352074 — `anh.vu3577@hcmut.edu.vn`
 
 ## Quick Start
 
@@ -210,14 +219,6 @@ See `reports/` for the full report and generated figures.
 - Keep config changes inside the config system instead of hardcoding values across cells.
 - Use the same random seed when reproducing reported results.
 - Generated folders may be absent before execution; the notebooks recreate them when needed.
-
-## Team
-
-- Nguyễn Mạnh Quốc Khánh — 2352525
-- Phan Ngọc Lan Chi — 2352137
-- Ngô Diễm Quyên — 2353031
-- Trần Lâm Anh — 2352067
-- Vũ Đức Việt Anh — 2352074
 
 ## Module Reference
 
